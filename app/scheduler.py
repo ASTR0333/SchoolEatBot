@@ -65,12 +65,13 @@ class DailyScheduler:
                 logger.exception("Could not send reminder to %s", user_id)
 
     async def _send_reports(self, target) -> None:  # noqa: ANN001
-        for user_id in await self.service.approved_admin_ids():
-            key = f"report:{target.isoformat()}:{user_id}"
+        for user_id, class_name in self.service.settings.report_recipients:
+            scope = class_name or "all"
+            key = f"report:v2:{target.isoformat()}:{user_id}:{scope}"
             if await self.service.delivery_exists(key):
                 continue
             try:
-                await self.service.send_report_to(user_id, target)
+                await self.service.send_report_to(user_id, target, class_name=class_name)
                 await self.service.record_delivery(key)
             except Exception:
-                logger.exception("Could not send report to admin %s", user_id)
+                logger.exception("Could not send report to %s", user_id)

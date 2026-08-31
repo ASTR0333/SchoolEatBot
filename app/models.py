@@ -31,18 +31,6 @@ class Parent(Base):
     )
 
 
-class AdminRequest(Base):
-    __tablename__ = "admin_requests"
-
-    user_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("parents.user_id"), primary_key=True, autoincrement=False
-    )
-    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
-    requested_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, nullable=False)
-    decided_at: Mapped[datetime | None] = mapped_column(DateTime)
-    decided_by: Mapped[int | None] = mapped_column(BigInteger)
-
-
 class Order(Base):
     __tablename__ = "orders"
     __table_args__ = (UniqueConstraint("parent_user_id", "target_date"),)

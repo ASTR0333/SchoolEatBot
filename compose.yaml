@@ -3,8 +3,6 @@ services:
     build: .
     restart: unless-stopped
     env_file: ${ENV_FILE:-.env}
-    ports:
-      - "${BOT_PORT:-8080}:8080"
     volumes:
       - bot-data:/app/data
 

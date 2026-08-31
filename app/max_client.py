@@ -109,42 +109,6 @@ class MaxClient:
             params["marker"] = marker
         return await self.request("GET", "/updates", params=params)
 
-    async def subscriptions(self) -> list[dict[str, Any]]:
-        result = await self.request("GET", "/subscriptions")
-        return result.get("subscriptions", [])
-
-    async def subscribe(self, url: str, secret: str | None) -> None:
-        payload: dict[str, Any] = {
-            "url": url,
-            "update_types": [
-                "message_created",
-                "message_callback",
-                "bot_started",
-                "bot_stopped",
-            ],
-        }
-        if secret:
-            payload["secret"] = secret
-        await self.request("POST", "/subscriptions", json=payload)
-
-    async def unsubscribe(self, url: str) -> None:
-        await self.request("DELETE", "/subscriptions", params={"url": url})
-
-    async def ensure_webhook(self, url: str, secret: str | None) -> None:
-        subscriptions = await self.subscriptions()
-        if any(item.get("url", "").rstrip("/") == url.rstrip("/") for item in subscriptions):
-            logger.info("Webhook already registered: %s", url)
-            return
-        await self.subscribe(url, secret)
-        logger.info("Webhook registered: %s", url)
-
-    async def delete_all_webhooks(self) -> None:
-        for subscription in await self.subscriptions():
-            url = subscription.get("url")
-            if url:
-                await self.unsubscribe(url)
-                logger.info("Webhook removed for polling mode: %s", url)
-
     async def upload_file(self, filename: str, content: bytes) -> str:
         upload = await self.request("POST", "/uploads", params={"type": "file"})
         upload_url = upload.get("url")

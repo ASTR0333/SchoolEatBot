@@ -4,19 +4,18 @@ import logging
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, select
 
 from app.config import Settings
 from app.database import Database
 from app.keyboards import (
-    admin_decision_keyboard,
     callback_button,
     class_keyboard,
     main_keyboard,
     order_keyboard,
 )
 from app.max_client import MaxClient
-from app.models import AdminRequest, Delivery, Order, Parent, utc_now
+from app.models import Delivery, Order, Parent
 from app.reports import ReportRow, build_report
 from app.timeutils import active_order_target, format_date_ru, local_now, next_service_day
 
@@ -101,7 +100,7 @@ class BotService:
             await self.max.send_message(
                 parent.user_id,
                 "Команды:\n/start или /menu — открыть меню\n/id — узнать свой MAX user_id\n"
-                "/report [ГГГГ-ММ-ДД] — отчёт (для администратора)",
+                "/report [ГГГГ-ММ-ДД] — отчёт (для создателя и преподавателей)",
             )
             return
         if text.startswith("/report"):
@@ -143,17 +142,6 @@ class BotService:
                 await self.send_order_prompt(parent.user_id)
             elif payload.startswith("order:"):
                 await self._save_order(parent.user_id, payload, callback_id)
-            elif payload == "admin:request":
-                await self._request_admin(parent.user_id, callback_id)
-            elif payload == "admin:pending":
-                await self.max.answer_callback(callback_id, "Заявка ещё ожидает решения владельца")
-            elif payload == "owner:requests":
-                await self.max.answer_callback(callback_id, "Показываю заявки")
-                await self._send_pending_requests(parent.user_id)
-            elif payload.startswith("admin:approve:"):
-                await self._decide_admin(parent.user_id, payload, callback_id, approve=True)
-            elif payload.startswith("admin:reject:"):
-                await self._decide_admin(parent.user_id, payload, callback_id, approve=False)
             else:
                 await self.max.answer_callback(callback_id, "Эта кнопка уже неактуальна")
         except Exception:
@@ -213,28 +201,25 @@ class BotService:
 
     async def send_menu(self, user_id: int, *, greeting: bool = False) -> None:
         target = self.active_target()
+        report_allowed, report_class = self.settings.report_scope(user_id)
+        if report_allowed:
+            if report_class is None:
+                text = (
+                    "Панель создателя бота. После закрытия заказов сюда придёт общий "
+                    "Excel-отчёт по всем классам."
+                )
+            else:
+                text = (
+                    f"Панель преподавателя класса {report_class}. После закрытия заказов "
+                    "сюда придёт Excel-отчёт только по вашему классу."
+                )
+            text += "\n\nПолучить отчёт вручную: /report или /report ГГГГ-ММ-ДД."
+            await self.max.send_message(user_id, text)
+            return
+
         async with self.db.session() as session:
             parent = await session.get(Parent, user_id)
             if parent is None:
-                return
-            if user_id == self.settings.owner_user_id and (
-                not parent.class_name or not parent.child_name
-            ):
-                pending_count = await session.scalar(
-                    select(func.count())
-                    .select_from(AdminRequest)
-                    .where(AdminRequest.status == "pending")
-                )
-                text = "Панель владельца бота."
-                if pending_count:
-                    text += f"\n\nЗаявок администратора: {pending_count}."
-                else:
-                    text += "\n\nНовых заявок администратора нет."
-                buttons = []
-                if pending_count:
-                    buttons.append([callback_button("Заявки администраторов", "owner:requests")])
-                buttons.append([callback_button("Добавить ребёнка", "profile:edit")])
-                await self.max.send_message(user_id, text, buttons)
                 return
             if not parent.class_name:
                 await self._start_profile(user_id)
@@ -255,18 +240,6 @@ class BotService:
                         Order.parent_user_id == user_id, Order.target_date == target
                     )
                 )
-            approved_count = await session.scalar(
-                select(func.count())
-                .select_from(AdminRequest)
-                .where(AdminRequest.status == "approved")
-            )
-            request = await session.get(AdminRequest, user_id)
-            pending_count = await session.scalar(
-                select(func.count())
-                .select_from(AdminRequest)
-                .where(AdminRequest.status == "pending")
-            )
-
         intro = "Здравствуйте!\n\n" if greeting else ""
         text = f"{intro}Ребёнок: {parent.child_name}\nКласс: {parent.class_name}"
         if target:
@@ -280,22 +253,9 @@ class BotService:
                 f"\n\nЗаказ можно выбрать с {self.settings.prompt_time} до "
                 f"{self.settings.deadline_time} по московскому времени."
             )
-        if request and request.status == "approved":
-            text += "\n\nВы — администратор. Итоговый Excel придёт после закрытия заказов."
-
         buttons = main_keyboard(
             can_order=target is not None,
             has_order=order is not None,
-            show_admin_request=(
-                not approved_count
-                and user_id != self.settings.owner_user_id
-                and (request is None or request.status != "pending")
-            ),
-            admin_request_pending=(
-                not approved_count and request is not None and request.status == "pending"
-            ),
-            is_owner=user_id == self.settings.owner_user_id,
-            has_pending_requests=bool(pending_count),
         )
         await self.max.send_message(user_id, text, buttons)
 
@@ -382,118 +342,11 @@ class BotService:
             return "обед"
         return "ничего не заказывать"
 
-    async def _request_admin(self, user_id: int, callback_id: str) -> None:
-        async with self.db.session() as session:
-            approved = await session.scalar(
-                select(AdminRequest).where(AdminRequest.status == "approved")
-            )
-            if approved:
-                await self.max.answer_callback(callback_id, "Администратор уже назначен")
-                return
-            parent = await session.get(Parent, user_id)
-            if parent is None or not parent.child_name or not parent.class_name:
-                await self.max.answer_callback(callback_id, "Сначала заполните данные ребёнка")
-                return
-            request = await session.get(AdminRequest, user_id)
-            if request is None:
-                request = AdminRequest(user_id=user_id, status="pending")
-                session.add(request)
-            else:
-                request.status = "pending"
-                request.requested_at = utc_now()
-                request.decided_at = None
-                request.decided_by = None
-            await session.commit()
-        await self.max.answer_callback(callback_id, "Заявка отправлена владельцу")
-        await self.max.send_message(user_id, "Заявка администратора отправлена владельцу бота.")
-        try:
-            await self._send_admin_request_to_owner(user_id)
-        except Exception:
-            logger.exception("Could not notify owner about admin request")
-
-    async def _send_admin_request_to_owner(self, candidate_id: int) -> None:
-        async with self.db.session() as session:
-            parent = await session.get(Parent, candidate_id)
-            if parent is None:
-                return
-        await self.max.send_message(
-            self.settings.owner_user_id,
-            "Заявка на роль администратора:\n"
-            f"Пользователь: {parent.display_name}\n"
-            f"MAX user_id: {parent.user_id}\n"
-            f"Ребёнок: {parent.child_name}\nКласс: {parent.class_name}",
-            admin_decision_keyboard(candidate_id),
-        )
-
-    async def _send_pending_requests(self, owner_id: int) -> None:
-        if owner_id != self.settings.owner_user_id:
-            await self.max.send_message(owner_id, "Эта команда доступна только владельцу.")
-            return
-        async with self.db.session() as session:
-            ids = list(
-                await session.scalars(
-                    select(AdminRequest.user_id).where(AdminRequest.status == "pending")
-                )
-            )
-        if not ids:
-            await self.max.send_message(owner_id, "Новых заявок нет.")
-            return
-        for candidate_id in ids:
-            await self._send_admin_request_to_owner(candidate_id)
-
-    async def _decide_admin(
-        self, owner_id: int, payload: str, callback_id: str, *, approve: bool
-    ) -> None:
-        if owner_id != self.settings.owner_user_id:
-            await self.max.answer_callback(callback_id, "Только владелец может принять решение")
-            return
-        try:
-            candidate_id = int(payload.rsplit(":", 1)[1])
-        except ValueError:
-            await self.max.answer_callback(callback_id, "Некорректная заявка")
-            return
-
-        async with self.db.session() as session:
-            request = await session.get(AdminRequest, candidate_id)
-            if request is None:
-                await self.max.answer_callback(callback_id, "Заявка не найдена")
-                return
-            if approve:
-                approved = await session.scalar(
-                    select(AdminRequest).where(
-                        AdminRequest.status == "approved", AdminRequest.user_id != candidate_id
-                    )
-                )
-                if approved:
-                    await self.max.answer_callback(callback_id, "Администратор уже назначен")
-                    return
-                request.status = "approved"
-            else:
-                request.status = "rejected"
-            request.decided_at = utc_now()
-            request.decided_by = owner_id
-            await session.commit()
-
-        result = "одобрена" if approve else "отклонена"
-        await self.max.answer_callback(callback_id, f"Заявка {result}")
-        await self.max.send_message(
-            candidate_id,
-            "Ваша заявка администратора одобрена. Итоговые Excel-таблицы будут приходить сюда."
-            if approve
-            else "Ваша заявка администратора отклонена владельцем бота.",
-        )
-
-    async def _is_report_allowed(self, user_id: int) -> bool:
-        if user_id == self.settings.owner_user_id:
-            return True
-        async with self.db.session() as session:
-            request = await session.get(AdminRequest, user_id)
-            return bool(request and request.status == "approved")
-
     async def _manual_report(self, user_id: int, command: str) -> None:
-        if not await self._is_report_allowed(user_id):
+        allowed, class_name = self.settings.report_scope(user_id)
+        if not allowed:
             await self.max.send_message(
-                user_id, "Отчёт доступен только владельцу и администратору."
+                user_id, "Отчёт доступен только создателю и указанным преподавателям."
             )
             return
         parts = command.split(maxsplit=1)
@@ -507,11 +360,11 @@ class BotService:
             target = self.active_target() or next_service_day(
                 self.now().date(), self.settings.school_days_only
             )
-        await self.send_report_to(user_id, target)
+        await self.send_report_to(user_id, target, class_name=class_name)
 
-    async def _report_rows(self, target: date) -> list[ReportRow]:
+    async def _report_rows(self, target: date, class_name: str | None = None) -> list[ReportRow]:
         async with self.db.session() as session:
-            result = await session.execute(
+            statement = (
                 select(Parent, Order)
                 .outerjoin(
                     Order,
@@ -527,6 +380,9 @@ class BotService:
                 )
                 .order_by(Parent.class_name, Parent.child_name)
             )
+            if class_name is not None:
+                statement = statement.where(Parent.class_name == class_name)
+            result = await session.execute(statement)
             return [
                 ReportRow(
                     class_name=parent.class_name or "",
@@ -537,14 +393,18 @@ class BotService:
                 for parent, order in result.all()
             ]
 
-    async def send_report_to(self, user_id: int, target: date) -> None:
-        content = build_report(target, await self._report_rows(target))
-        filename = f"orders_{target.isoformat()}.xlsx"
+    async def send_report_to(
+        self, user_id: int, target: date, *, class_name: str | None = None
+    ) -> None:
+        content = build_report(target, await self._report_rows(target, class_name))
+        class_suffix = f"_{class_name}" if class_name else ""
+        filename = f"orders{class_suffix}_{target.isoformat()}.xlsx"
+        scope_text = f" для класса {class_name}" if class_name else " по всем классам"
         await self.max.send_excel(
             user_id,
             filename,
             content,
-            f"Итоговый заказ на {format_date_ru(target)}.",
+            f"Итоговый заказ{scope_text} на {format_date_ru(target)}.",
         )
 
     async def delivery_exists(self, key: str) -> bool:
@@ -574,13 +434,3 @@ class BotService:
                     .exists()
                 )
             return list(await session.scalars(statement))
-
-    async def approved_admin_ids(self) -> list[int]:
-        async with self.db.session() as session:
-            return list(
-                await session.scalars(
-                    select(AdminRequest.user_id)
-                    .join(Parent, Parent.user_id == AdminRequest.user_id)
-                    .where(AdminRequest.status == "approved", Parent.active.is_(True))
-                )
-            )
