@@ -43,11 +43,14 @@ bot.action('staff:report', (ctx) => service.handleStaffReportAction(ctx));
 bot.action(/^role:(parent|staff)$/u, (ctx) => service.handleRoleAction(ctx));
 bot.action(/^test:(on|off)$/u, (ctx) => service.handleTestAction(ctx));
 bot.action('schedule:menu', (ctx) => service.handleScheduleMenuAction(ctx));
-bot.action(/^schedule:edit:(prompt|reminder|deadline)$/u, (ctx) => service.handleScheduleEditAction(ctx));
-bot.action(/^schedule:adjust:(prompt|reminder|deadline):(\d+)$/u, (ctx) =>
+bot.action(/^schedule:class:(.+)$/u, (ctx) => service.handleScheduleClassAction(ctx));
+bot.action(/^schedule:edit:(prompt|reminder|deadline):(.+)$/u, (ctx) =>
+  service.handleScheduleEditAction(ctx),
+);
+bot.action(/^schedule:adjust:(prompt|reminder|deadline):(\d+):(.+)$/u, (ctx) =>
   service.handleScheduleAdjustAction(ctx),
 );
-bot.action(/^schedule:save:(prompt|reminder|deadline):(\d+)$/u, (ctx) =>
+bot.action(/^schedule:save:(prompt|reminder|deadline):(\d+):(.+)$/u, (ctx) =>
   service.handleScheduleSaveAction(ctx),
 );
 bot.on('message_callback', (ctx) => service.handleUnknownAction(ctx));

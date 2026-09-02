@@ -112,27 +112,42 @@ export function backToMenuKeyboard() {
   return Keyboard.inlineKeyboard([[callback('🏠 В меню', 'menu:main')]]);
 }
 
-export function scheduleMenuKeyboard() {
+export function scheduleClassKeyboard(classes) {
   return Keyboard.inlineKeyboard([
-    [callback('🟢 Время начала', 'schedule:edit:prompt')],
-    [callback('🔔 Время напоминания', 'schedule:edit:reminder')],
-    [callback('🔴 Время окончания', 'schedule:edit:deadline')],
+    ...classes.map((className) => [
+      callback(`🏫 ${className}`, `schedule:class:${className}`),
+    ]),
     [callback('🏠 В меню', 'menu:main')],
   ]);
 }
 
-export function scheduleEditKeyboard(field, minutes) {
+export function scheduleMenuKeyboard(className, { canChooseClass = false } = {}) {
+  const suffix = `:${className}`;
+  const rows = [
+    [callback('🟢 Время начала', `schedule:edit:prompt${suffix}`)],
+    [callback('🔔 Время напоминания', `schedule:edit:reminder${suffix}`)],
+    [callback('🔴 Время окончания', `schedule:edit:deadline${suffix}`)],
+  ];
+  if (canChooseClass) rows.push([callback('⬅️ Выбрать другой класс', 'schedule:menu')]);
+  rows.push([callback('🏠 В меню', 'menu:main')]);
+  return Keyboard.inlineKeyboard([
+    ...rows,
+  ]);
+}
+
+export function scheduleEditKeyboard(field, minutes, className) {
   const adjusted = (delta) => (minutes + delta + 1440) % 1440;
+  const suffix = `:${className}`;
   return Keyboard.inlineKeyboard([
     [
-      callback('− 1 час', `schedule:adjust:${field}:${adjusted(-60)}`),
-      callback('− 15 мин', `schedule:adjust:${field}:${adjusted(-15)}`),
+      callback('− 1 час', `schedule:adjust:${field}:${adjusted(-60)}${suffix}`),
+      callback('− 15 мин', `schedule:adjust:${field}:${adjusted(-15)}${suffix}`),
     ],
     [
-      callback('+ 15 мин', `schedule:adjust:${field}:${adjusted(15)}`),
-      callback('+ 1 час', `schedule:adjust:${field}:${adjusted(60)}`),
+      callback('+ 15 мин', `schedule:adjust:${field}:${adjusted(15)}${suffix}`),
+      callback('+ 1 час', `schedule:adjust:${field}:${adjusted(60)}${suffix}`),
     ],
-    [callback('✅ Сохранить', `schedule:save:${field}:${minutes}`)],
-    [callback('⬅️ Назад', 'schedule:menu')],
+    [callback('✅ Сохранить', `schedule:save:${field}:${minutes}${suffix}`)],
+    [callback('⬅️ Назад', `schedule:class:${className}`)],
   ]);
 }

@@ -24,17 +24,19 @@ export class DailyScheduler {
     this.running = true;
     try {
       const { config } = this.service;
-      const schedule = this.service.getSchedule?.() ?? config;
       const local = localNow(config.timezone, now);
       if (!isSchoolDay(local.date)) return;
       const target = nextServiceDay(local.date);
 
-      if (local.minutes >= schedule.promptMinutes && local.minutes < schedule.reminderMinutes) {
-        await this.sendPrompts(target);
-      } else if (local.minutes >= schedule.reminderMinutes && local.minutes < schedule.deadlineMinutes) {
-        await this.sendReminders(target);
-      } else if (local.minutes >= schedule.deadlineMinutes) {
-        await this.sendReports(target);
+      for (const className of config.classes) {
+        const schedule = this.service.getSchedule?.(className) ?? config;
+        if (local.minutes >= schedule.promptMinutes && local.minutes < schedule.reminderMinutes) {
+          await this.sendPrompts(target, className);
+        } else if (local.minutes >= schedule.reminderMinutes && local.minutes < schedule.deadlineMinutes) {
+          await this.sendReminders(target, className);
+        } else if (local.minutes >= schedule.deadlineMinutes) {
+          await this.sendReports(target, className);
+        }
       }
     } catch (error) {
       console.error('Ошибка плановой задачи', error);
@@ -43,12 +45,12 @@ export class DailyScheduler {
     }
   }
 
-  async sendPrompts(target) {
-    for (const userId of this.service.database.registeredParentIds(target)) {
-      const key = `prompt:${target}:${userId}`;
+  async sendPrompts(target, className) {
+    for (const userId of this.service.database.registeredParentIds(target, className)) {
+      const key = `prompt:${target}:${className}:${userId}`;
       if (this.service.database.deliveryExists(key)) continue;
       try {
-        await this.service.sendOrderPrompt(userId);
+        await this.service.sendOrderPrompt(userId, { className });
         this.service.database.recordDelivery(key);
       } catch (error) {
         console.error(`Не удалось отправить выбор питания пользователю ${userId}`, error);
@@ -56,12 +58,12 @@ export class DailyScheduler {
     }
   }
 
-  async sendReminders(target) {
-    for (const userId of this.service.database.registeredParentIds(target)) {
-      const key = `reminder:${target}:${userId}`;
+  async sendReminders(target, className) {
+    for (const userId of this.service.database.registeredParentIds(target, className)) {
+      const key = `reminder:${target}:${className}:${userId}`;
       if (this.service.database.deliveryExists(key)) continue;
       try {
-        await this.service.sendOrderPrompt(userId, { reminder: true });
+        await this.service.sendOrderPrompt(userId, { reminder: true, className });
         this.service.database.recordDelivery(key);
       } catch (error) {
         console.error(`Не удалось отправить напоминание пользователю ${userId}`, error);
@@ -69,8 +71,9 @@ export class DailyScheduler {
     }
   }
 
-  async sendReports(target) {
+  async sendReports(target, onlyClassName = null) {
     for (const [userId, className] of this.service.config.reportRecipients) {
+      if (onlyClassName !== null && className !== onlyClassName) continue;
       const key = `report:js:${target}:${userId}:${className ?? 'all'}`;
       if (this.service.database.deliveryExists(key)) continue;
       try {

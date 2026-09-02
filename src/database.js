@@ -204,20 +204,28 @@ export class Database {
     `).run(childId, targetDate, Number(breakfast), Number(lunch), nowIso());
   }
 
-  registeredParentIds(unansweredFor = null) {
+  registeredParentIds(unansweredFor = null, className = null) {
+    const classCondition = className === null ? '' : 'AND c.class_name = ?';
     const condition = unansweredFor
       ? `AND EXISTS (
           SELECT 1 FROM children c
           WHERE c.parent_user_id = p.user_id AND c.active = 1
+            ${classCondition}
             AND NOT EXISTS (
               SELECT 1 FROM orders o WHERE o.child_id = c.id AND o.target_date = ?
             )
         )`
-      : 'AND EXISTS (SELECT 1 FROM children c WHERE c.parent_user_id = p.user_id AND c.active = 1)';
+      : `AND EXISTS (
+          SELECT 1 FROM children c
+          WHERE c.parent_user_id = p.user_id AND c.active = 1 ${classCondition}
+        )`;
     const statement = this.connection.prepare(
       `SELECT p.user_id FROM parents p WHERE p.active = 1 ${condition}`,
     );
-    const rows = unansweredFor ? statement.all(unansweredFor) : statement.all();
+    const parameters = [];
+    if (className !== null) parameters.push(className);
+    if (unansweredFor) parameters.push(unansweredFor);
+    const rows = statement.all(...parameters);
     return rows.map((row) => Number(row.user_id));
   }
 

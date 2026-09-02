@@ -49,6 +49,20 @@ test('один родитель может добавить детей из об
   });
 });
 
+test('получатели напоминаний фильтруются по классу', async () => {
+  await withDatabase(async (database) => {
+    database.upsertParent({ user_id: 1, name: 'Оба класса' }, 1);
+    database.upsertParent({ user_id: 2, name: 'Только второй класс' }, 2);
+    const first = database.addChild(1, 'Иванов Иван', '8МК');
+    database.addChild(1, 'Петров Пётр', '2Б');
+    database.addChild(2, 'Сидоров Семён', '2Б');
+    database.saveOrder(first.id, '2026-09-03', true, false);
+
+    assert.deepEqual(database.registeredParentIds('2026-09-03', '8МК'), []);
+    assert.deepEqual(database.registeredParentIds('2026-09-03', '2Б'), [1, 2]);
+  });
+});
+
 test('старая тестовая схема очищается при переходе на новую модель', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'school-eat-legacy-'));
   const path = join(directory, 'bot.db');

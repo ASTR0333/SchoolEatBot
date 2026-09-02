@@ -14,6 +14,7 @@ import {
   orderKeyboard,
   parentMenuKeyboard,
   savedOrderKeyboard,
+  scheduleClassKeyboard,
   scheduleEditKeyboard,
   scheduleMenuKeyboard,
   staffMenuKeyboard,
@@ -73,12 +74,20 @@ export class BotService {
       : { name: 'parent', className: null };
   }
 
-  getSchedule() {
-    const stored = this.database.getSettings(['prompt_time', 'reminder_time', 'deadline_time']);
-    const promptTime = stored.prompt_time ?? this.config.promptTime;
-    const reminderTime = stored.reminder_time ?? this.config.reminderTime;
-    const deadlineTime = stored.deadline_time ?? this.config.deadlineTime;
+  scheduleSettingKey(className, field) {
+    return `schedule:${className}:${field}_time`;
+  }
+
+  getSchedule(className = this.config.classes[0]) {
+    const keys = Object.fromEntries(
+      Object.keys(SCHEDULE_FIELDS).map((field) => [field, this.scheduleSettingKey(className, field)]),
+    );
+    const stored = this.database.getSettings(Object.values(keys));
+    const promptTime = stored[keys.prompt] ?? this.config.promptTime;
+    const reminderTime = stored[keys.reminder] ?? this.config.reminderTime;
+    const deadlineTime = stored[keys.deadline] ?? this.config.deadlineTime;
     return {
+      className,
       promptTime,
       reminderTime,
       deadlineTime,
@@ -88,20 +97,46 @@ export class BotService {
     };
   }
 
-  runtimeConfig() {
-    return { ...this.config, ...this.getSchedule() };
+  runtimeConfig(className = this.config.classes[0]) {
+    return { ...this.config, ...this.getSchedule(className) };
   }
 
-  activeTarget(now = new Date()) {
-    return activeOrderTarget(this.runtimeConfig(), now);
+  activeTarget(now = new Date(), className = this.config.classes[0]) {
+    return activeOrderTarget(this.runtimeConfig(className), now);
   }
 
-  activeTargetFor(userId, now = new Date()) {
+  activeTargetFor(userId, now = new Date(), className = null) {
     const parent = this.database.getParent(userId);
     if (this.roleFor(userId).name === 'creator' && parent?.view_mode === 'test') {
       return nextServiceDay(localNow(this.config.timezone, now).date);
     }
-    return this.activeTarget(now);
+    if (className !== null) return this.activeTarget(now, className);
+    const classes = new Set(this.database.childrenForParent(userId).map((child) => child.class_name));
+    for (const candidate of classes) {
+      const target = this.activeTarget(now, candidate);
+      if (target) return target;
+    }
+    return null;
+  }
+
+  scheduleClassFor(userId, requestedClassName = null) {
+    const role = this.roleFor(userId);
+    if (role.name === 'teacher') {
+      return requestedClassName === null || requestedClassName === role.className
+        ? role.className
+        : null;
+    }
+    if (role.name === 'creator' && this.config.classes.includes(requestedClassName)) {
+      return requestedClassName;
+    }
+    return null;
+  }
+
+  schedulesText(classNames) {
+    return classNames.map((className) => {
+      const schedule = this.getSchedule(className);
+      return `${className}: ${schedule.promptTime}–${schedule.deadlineTime}, напоминание ${schedule.reminderTime}`;
+    }).join('\n');
   }
 
   ensureParent(ctx) {
@@ -389,40 +424,66 @@ export class BotService {
     await this.sendScheduleMenu(parent.user_id);
   }
 
-  async handleScheduleEditAction(ctx) {
+  async handleScheduleClassAction(ctx) {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
-    if (!this.isStaff(parent.user_id)) {
+    const className = this.scheduleClassFor(parent.user_id, ctx.match?.[1] ?? '');
+    if (!className) {
       await ctx.answerOnCallback({});
-      await this.sendMessage(parent.user_id, 'Настройка расписания доступна только сотрудникам.', backToMenuKeyboard());
+      await this.sendMessage(parent.user_id, 'У вас нет доступа к расписанию этого класса.', backToMenuKeyboard());
       return;
     }
     await ctx.answerOnCallback({});
-    await this.sendScheduleEditor(parent.user_id, ctx.match?.[1]);
+    await this.sendScheduleMenu(parent.user_id, className);
+  }
+
+  async handleScheduleEditAction(ctx) {
+    const parent = this.ensureParent(ctx);
+    if (!parent) return;
+    const className = this.scheduleClassFor(parent.user_id, ctx.match?.[2] ?? null);
+    if (!className) {
+      await ctx.answerOnCallback({});
+      await this.sendMessage(parent.user_id, 'У вас нет доступа к расписанию этого класса.', backToMenuKeyboard());
+      return;
+    }
+    await ctx.answerOnCallback({});
+    await this.sendScheduleEditor(parent.user_id, ctx.match?.[1], className);
   }
 
   async handleScheduleAdjustAction(ctx) {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
-    if (!this.isStaff(parent.user_id)) {
+    const className = this.scheduleClassFor(parent.user_id, ctx.match?.[3] ?? null);
+    if (!className) {
       await ctx.answerOnCallback({});
-      await this.sendMessage(parent.user_id, 'Настройка расписания доступна только сотрудникам.', backToMenuKeyboard());
+      await this.sendMessage(parent.user_id, 'У вас нет доступа к расписанию этого класса.', backToMenuKeyboard());
       return;
     }
     await ctx.answerOnCallback({});
-    await this.sendScheduleEditor(parent.user_id, ctx.match?.[1], Number(ctx.match?.[2]));
+    await this.sendScheduleEditor(
+      parent.user_id,
+      ctx.match?.[1],
+      className,
+      Number(ctx.match?.[2]),
+    );
   }
 
   async handleScheduleSaveAction(ctx) {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
-    if (!this.isStaff(parent.user_id)) {
+    const className = this.scheduleClassFor(parent.user_id, ctx.match?.[3] ?? null);
+    if (!className) {
       await ctx.answerOnCallback({});
-      await this.sendMessage(parent.user_id, 'Настройка расписания доступна только сотрудникам.', backToMenuKeyboard());
+      await this.sendMessage(parent.user_id, 'У вас нет доступа к расписанию этого класса.', backToMenuKeyboard());
       return;
     }
     await ctx.answerOnCallback({});
-    await this.saveScheduleField(parent.user_id, ctx.match?.[1], Number(ctx.match?.[2]));
+    await this.saveScheduleField(
+      parent.user_id,
+      ctx.match?.[1],
+      Number(ctx.match?.[2]),
+      className,
+    );
   }
 
   async handleUnknownAction(ctx) {
@@ -559,26 +620,31 @@ export class BotService {
     const role = this.roleFor(userId);
     const isParentView = role.name === 'parent' || parent.view_mode === 'parent' || parent.view_mode === 'test';
     if (!isParentView) {
-      const schedule = this.getSchedule();
       const text = role.name === 'teacher'
         ? `Панель преподавателя класса ${role.className}. Здесь можно управлять детьми своего класса и получить отчёт.`
         : 'Панель создателя. Отчёты формируются отдельно по каждому классу. Здесь также доступны все дети, расписание и тестовый режим.';
+      const scheduleText = this.schedulesText(
+        role.name === 'teacher' ? [role.className] : this.config.classes,
+      );
       await this.sendMessage(
         userId,
         `${greeting ? 'Здравствуйте!\n\n' : ''}${text}\n\n` +
-          `Заказы: ${schedule.promptTime}–${schedule.deadlineTime}, напоминание: ${schedule.reminderTime}.`,
+          `Расписание заказов:\n${scheduleText}.`,
         staffMenuKeyboard({ role: role.name }),
       );
       return;
     }
 
     const children = this.database.childrenForParent(userId);
-    const schedule = this.getSchedule();
+    const childClasses = [...new Set(children.map((child) => child.class_name))];
+    const scheduleText = childClasses.length
+      ? this.schedulesText(childClasses)
+      : 'появится после добавления ребёнка';
     const testText = parent.view_mode === 'test' ? '\n🧪 Тестовый режим: заказ доступен в любое время.' : '';
     await this.sendMessage(
       userId,
       `${greeting ? 'Здравствуйте!\n\n' : ''}Детей в списке: ${children.length}.` +
-        `\nЗаказы: ${schedule.promptTime}–${schedule.deadlineTime}, напоминание: ${schedule.reminderTime}.` +
+        `\nРасписание заказов:\n${scheduleText}.` +
         testText,
       parentMenuKeyboard({
         canOrder: this.activeTargetFor(userId) !== null && children.length > 0,
@@ -610,7 +676,10 @@ export class BotService {
       await this.sendMessage(userId, 'У вас нет доступа к служебному списку.');
       return;
     }
-    const children = this.childrenForList(userId, listType);
+    let children = this.childrenForList(userId, listType);
+    if (orderMode) {
+      children = children.filter((child) => this.activeTargetFor(userId, new Date(), child.class_name));
+    }
     const title = orderMode
       ? 'Выберите ребёнка для заказа:'
       : listType === 'staff'
@@ -629,7 +698,7 @@ export class BotService {
       await this.sendMessage(userId, 'Ребёнок не найден или у вас нет доступа.');
       return;
     }
-    const target = this.activeTargetFor(userId);
+    const target = this.activeTargetFor(userId, new Date(), child.class_name);
     const order = target ? this.database.getOrder(child.id, target) : null;
     let text = `👦 ${child.child_name}\n🏫 Класс: ${child.class_name}`;
     if (target) {
@@ -650,23 +719,38 @@ export class BotService {
     );
   }
 
-  async sendOrderPrompt(userId, { childId = null, reminder = false } = {}) {
-    const target = this.activeTargetFor(userId);
-    const schedule = this.getSchedule();
-    if (!target) {
-      await this.sendMessage(
-        userId,
-        `Сейчас заказ закрыт. Выбор доступен с ${schedule.promptTime} до ${schedule.deadlineTime}.`,
+  async sendOrderPrompt(userId, { childId = null, reminder = false, className = null } = {}) {
+    if (childId === null && className !== null) {
+      const target = this.activeTargetFor(userId, new Date(), className);
+      if (!target) return;
+      const children = this.database.childrenForParent(userId).filter(
+        (child) => child.class_name === className && !this.database.getOrder(child.id, target),
       );
+      for (const child of children) {
+        await this.sendOrderPrompt(userId, { childId: child.id, reminder });
+      }
       return;
     }
     if (childId === null) {
+      if (!this.activeTargetFor(userId)) {
+        await this.sendMessage(userId, 'Сейчас заказ закрыт для всех классов ваших детей.');
+        return;
+      }
       await this.sendChildrenList(userId, { type: 'order' });
       return;
     }
     const child = this.accessibleChild(userId, childId);
     if (!child) {
       await this.sendMessage(userId, 'Ребёнок не найден или у вас нет доступа.');
+      return;
+    }
+    const schedule = this.getSchedule(child.class_name);
+    const target = this.activeTargetFor(userId, new Date(), child.class_name);
+    if (!target) {
+      await this.sendMessage(
+        userId,
+        `Сейчас заказ закрыт. Выбор доступен с ${schedule.promptTime} до ${schedule.deadlineTime}.`,
+      );
       return;
     }
     await this.sendMessage(
@@ -682,13 +766,13 @@ export class BotService {
       await this.sendMessage(userId, 'Эта кнопка некорректна или уже неактуальна.');
       return;
     }
-    if (target !== this.activeTargetFor(userId)) {
-      await this.sendMessage(userId, 'Время изменения этого заказа уже закончилось. Откройте /menu.');
-      return;
-    }
     const child = this.accessibleChild(userId, childId);
     if (!child) {
       await this.sendMessage(userId, 'Ребёнок не найден или у вас нет доступа.');
+      return;
+    }
+    if (target !== this.activeTargetFor(userId, new Date(), child.class_name)) {
+      await this.sendMessage(userId, 'Время изменения этого заказа уже закончилось. Откройте /menu.');
       return;
     }
     const [breakfast, lunch] = ORDER_CHOICES[choice];
@@ -708,17 +792,31 @@ export class BotService {
     return 'ничего не заказывать';
   }
 
-  async sendScheduleMenu(userId) {
-    const schedule = this.getSchedule();
+  async sendScheduleMenu(userId, requestedClassName = null) {
+    const role = this.roleFor(userId);
+    if (role.name === 'creator' && requestedClassName === null) {
+      await this.sendMessage(
+        userId,
+        'Для какого класса настроить расписание?',
+        scheduleClassKeyboard(this.config.classes),
+      );
+      return;
+    }
+    const className = this.scheduleClassFor(userId, requestedClassName);
+    if (!className) {
+      await this.sendMessage(userId, 'У вас нет доступа к настройке расписания.', backToMenuKeyboard());
+      return;
+    }
+    const schedule = this.getSchedule(className);
     await this.sendMessage(
       userId,
-      `Текущее расписание:\n🟢 Начало: ${schedule.promptTime}\n` +
+      `Расписание класса ${className}:\n🟢 Начало: ${schedule.promptTime}\n` +
         `🔔 Напоминание: ${schedule.reminderTime}\n🔴 Окончание: ${schedule.deadlineTime}`,
-      scheduleMenuKeyboard(),
+      scheduleMenuKeyboard(className, { canChooseClass: role.name === 'creator' }),
     );
   }
 
-  async sendScheduleEditor(userId, field, minutes = null) {
+  async sendScheduleEditor(userId, field, className, minutes = null) {
     if (!(field in SCHEDULE_FIELDS)) {
       await this.sendMessage(userId, 'Неизвестная настройка расписания.');
       return;
@@ -726,32 +824,45 @@ export class BotService {
     const [label, , minutesKey] = SCHEDULE_FIELDS[field];
     const value = Number.isInteger(minutes) && minutes >= 0 && minutes < 1440
       ? minutes
-      : this.getSchedule()[minutesKey];
+      : this.getSchedule(className)[minutesKey];
     await this.sendMessage(
       userId,
-      `${label}: ${minutesToClock(value)}. Измените кнопками и нажмите «Сохранить».`,
-      scheduleEditKeyboard(field, value),
+      `Класс ${className}. ${label}: ${minutesToClock(value)}. ` +
+        'Измените кнопками и нажмите «Сохранить».',
+      scheduleEditKeyboard(field, value, className),
     );
   }
 
-  async saveScheduleField(userId, field, minutes) {
+  async saveScheduleField(userId, field, minutes, requestedClassName = null) {
     if (!(field in SCHEDULE_FIELDS) || !Number.isInteger(minutes) || minutes < 0 || minutes >= 1440) {
       await this.sendMessage(userId, 'Некорректное время.');
       return;
     }
+    const className = this.scheduleClassFor(userId, requestedClassName);
+    if (!className) {
+      await this.sendMessage(userId, 'У вас нет доступа к расписанию этого класса.', backToMenuKeyboard());
+      return;
+    }
     const [, timeKey, minutesKey] = SCHEDULE_FIELDS[field];
-    const next = { ...this.getSchedule(), [timeKey]: minutesToClock(minutes), [minutesKey]: minutes };
+    const next = {
+      ...this.getSchedule(className),
+      [timeKey]: minutesToClock(minutes),
+      [minutesKey]: minutes,
+    };
     if (!(next.promptMinutes < next.reminderMinutes && next.reminderMinutes < next.deadlineMinutes)) {
       await this.sendMessage(
         userId,
         'Не сохранено: начало должно быть раньше напоминания, а напоминание — раньше окончания.',
       );
-      await this.sendScheduleEditor(userId, field, minutes);
+      await this.sendScheduleEditor(userId, field, className, minutes);
       return;
     }
-    this.database.setSetting(`${field}_time`, minutesToClock(minutes));
-    await this.sendMessage(userId, 'Расписание сохранено. Новое время применяется сразу.');
-    await this.sendScheduleMenu(userId);
+    this.database.setSetting(this.scheduleSettingKey(className, field), minutesToClock(minutes));
+    await this.sendMessage(
+      userId,
+      `Расписание класса ${className} сохранено. Новое время применяется сразу.`,
+    );
+    await this.sendScheduleMenu(userId, className);
   }
 
   async sendManualReport(userId, command) {

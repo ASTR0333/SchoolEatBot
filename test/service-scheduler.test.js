@@ -213,13 +213,36 @@ test('создатель переключается в обычный режим
   });
 });
 
-test('создатель сохраняет новое расписание, родителю это запрещено', async () => {
+test('расписания классов независимы, преподаватель меняет только свой класс', async () => {
   await fixture(async ({ service, database }) => {
     database.upsertParent({ user_id: 100, name: 'Создатель' }, 100);
+    database.upsertParent({ user_id: 200, name: 'Учитель' }, 200);
     database.upsertParent({ user_id: 777, name: 'Родитель' }, 777);
-    await service.saveScheduleField(100, 'prompt', 14 * 60);
-    assert.equal(service.getSchedule().promptTime, '14:00');
+
+    await service.saveScheduleField(100, 'prompt', 14 * 60, '2Б');
+    assert.equal(service.getSchedule('2Б').promptTime, '14:00');
+    assert.equal(service.getSchedule('8МК').promptTime, '15:00');
+
+    await service.saveScheduleField(200, 'deadline', 16 * 60 + 45, '8МК');
+    assert.equal(service.getSchedule('8МК').deadlineTime, '16:45');
+    assert.equal(service.getSchedule('2Б').deadlineTime, '17:00');
+
+    await service.saveScheduleField(200, 'deadline', 17 * 60 + 30, '2Б');
+    assert.equal(service.getSchedule('2Б').deadlineTime, '17:00');
     assert.equal(service.isStaff(777), false);
+  });
+});
+
+test('создатель сначала выбирает класс, преподаватель сразу видит свой', async () => {
+  await fixture(async ({ service, database, api }) => {
+    database.upsertParent({ user_id: 100, name: 'Создатель' }, 100);
+    database.upsertParent({ user_id: 200, name: 'Учитель' }, 200);
+
+    await service.sendScheduleMenu(100);
+    await service.sendScheduleMenu(200);
+
+    assert.match(api.messages[0].text, /Для какого класса/);
+    assert.match(api.messages[1].text, /Расписание класса 8МК/);
   });
 });
 
@@ -252,4 +275,30 @@ test('планировщик отправляет создателю два от
     { userId: 100, target: '2026-09-03', className: '2Б' },
     { userId: 200, target: '2026-09-03', className: '8МК' },
   ]);
+});
+
+test('планировщик учитывает время каждого класса отдельно', async () => {
+  const prompted = [];
+  const fakeService = {
+    config: config(),
+    getSchedule(className) {
+      return className === '8МК'
+        ? { promptMinutes: 15 * 60, reminderMinutes: 16 * 60, deadlineMinutes: 17 * 60 }
+        : { promptMinutes: 16 * 60, reminderMinutes: 17 * 60, deadlineMinutes: 18 * 60 };
+    },
+    database: {
+      registeredParentIds: () => [777],
+      deliveryExists: () => false,
+      recordDelivery: () => {},
+    },
+    async sendOrderPrompt(userId, options) {
+      prompted.push({ userId, ...options });
+    },
+    async sendReportTo() {},
+  };
+  const scheduler = new DailyScheduler(fakeService);
+
+  await scheduler.tick(new Date('2026-09-02T12:15:00Z'));
+
+  assert.deepEqual(prompted, [{ userId: 777, className: '8МК' }]);
 });
