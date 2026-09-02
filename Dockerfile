@@ -1,31 +1,24 @@
-FROM python:3.12-slim AS builder
+FROM node:24-bookworm-slim
 
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1
+ENV NODE_ENV=production \
+    NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/russian_trusted_root_ca.crt
 
-WORKDIR /build
-COPY pyproject.toml ./
-COPY app ./app
-RUN python -m venv /opt/venv \
-    && /opt/venv/bin/pip install --upgrade pip \
-    && /opt/venv/bin/pip install .
-
-FROM python:3.12-slim
-
-ENV PATH="/opt/venv/bin:$PATH" \
-    PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+WORKDIR /app
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && addgroup --system bot \
-    && adduser --system --ingroup bot --home /app bot
+    && groupadd --system --gid 101 bot \
+    && useradd --system --uid 100 --gid bot --home-dir /app --shell /usr/sbin/nologin bot
 
-COPY --from=builder /opt/venv /opt/venv
-WORKDIR /app
-COPY --chown=bot:bot app ./app
+COPY certs/russian_trusted_root_ca.crt /usr/local/share/ca-certificates/
+RUN update-ca-certificates
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+COPY --chown=bot:bot src ./src
 RUN mkdir -p /app/data && chown bot:bot /app/data
 
 USER bot
-CMD ["python", "-m", "app.main"]
+CMD ["node", "src/index.js"]

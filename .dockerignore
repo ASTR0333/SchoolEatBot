@@ -1,11 +1,12 @@
 .git
 .env
+node_modules
 .venv
 .pytest_cache
 .ruff_cache
 __pycache__
 *.pyc
+*.log
 data
 reports
 tests
-
