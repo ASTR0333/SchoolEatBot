@@ -58,15 +58,21 @@ test('нажатие кнопки редактирует текущее сооб
     database.upsertParent({ user_id: 777, name: 'Родитель' }, 777);
     database.addChild(777, 'Иванов Иван', '8МК');
 
+    let callbackAnswer;
     await service.withUpdateContext(
-      { updateType: 'message_callback', messageId: 'message-1' },
+      {
+        updateType: 'message_callback',
+        messageId: 'message-1',
+        async answerOnCallback(answer) {
+          callbackAnswer = answer;
+        },
+      },
       () => service.sendChildrenList(777),
     );
 
     assert.equal(api.messages.length, 0);
-    assert.equal(api.editedMessages.length, 1);
-    assert.equal(api.editedMessages[0].messageId, 'message-1');
-    assert.match(api.editedMessages[0].text, /Ваши дети/);
+    assert.equal(api.editedMessages.length, 0);
+    assert.match(callbackAnswer.message.text, /Ваши дети/);
   });
 });
 
@@ -82,7 +88,7 @@ test('нажатие класса подтверждается и перевод
       },
     });
 
-    assert.deepEqual(callbackAnswer, { notification: 'Класс выбран' });
+    assert.deepEqual(callbackAnswer, {});
     assert.equal(database.getParent(777).state, 'awaiting_name:add:8МК');
     assert.match(api.messages.at(-1).text, /Напишите фамилию и имя ребёнка/);
   });
@@ -94,8 +100,49 @@ test('панели сотрудников не требуют профиль р�
     database.upsertParent({ user_id: 200, name: 'Учитель' }, 200);
     await service.sendMenu(100);
     await service.sendMenu(200);
-    assert.match(api.messages[0].text, /общий отчёт/);
+    assert.match(api.messages[0].text, /отдельно по каждому классу/);
     assert.match(api.messages[1].text, /класса 8МК/);
+  });
+});
+
+test('после выбора класса старая клавиатура удаляется из сообщения', async () => {
+  await fixture(async ({ service, api }) => {
+    let callbackAnswer;
+    const ctx = {
+      updateType: 'message_callback',
+      messageId: 'message-with-classes',
+      user: { user_id: 777, name: 'Родитель' },
+      chatId: 777,
+      match: ['class:add:0:8МК', 'add', '0', '8МК'],
+      async answerOnCallback(answer) {
+        callbackAnswer = answer;
+      },
+    };
+    await service.withUpdateContext(ctx, () => service.handleClassAction(ctx));
+
+    assert.equal(api.editedMessages.length, 0);
+    assert.deepEqual(callbackAnswer.message.attachments, []);
+    assert.match(callbackAnswer.message.text, /Напишите фамилию и имя ребёнка/);
+  });
+});
+
+test('создатель получает два отдельных отчёта, преподаватель — только свой', async () => {
+  await fixture(async ({ service, database }) => {
+    database.upsertParent({ user_id: 100, name: 'Создатель' }, 100);
+    database.upsertParent({ user_id: 200, name: 'Учитель' }, 200);
+    const sent = [];
+    service.sendReportTo = async (userId, target, className) => {
+      sent.push({ userId, target, className });
+    };
+
+    await service.sendManualReport(100, '/report 2026-09-03');
+    await service.sendManualReport(200, '/report 2026-09-03');
+
+    assert.deepEqual(sent, [
+      { userId: 100, target: '2026-09-03', className: '8МК' },
+      { userId: 100, target: '2026-09-03', className: '2Б' },
+      { userId: 200, target: '2026-09-03', className: '8МК' },
+    ]);
   });
 });
 
@@ -132,6 +179,40 @@ test('преподаватель может перейти в роль роди�
   });
 });
 
+test('права удаления зависят от текущего режима и принадлежности ребёнка', async () => {
+  await fixture(async ({ service, database }) => {
+    database.upsertParent({ user_id: 100, name: 'Создатель' }, 100);
+    database.upsertParent({ user_id: 200, name: 'Учитель' }, 200);
+    database.upsertParent({ user_id: 777, name: 'Первый родитель' }, 777);
+    database.upsertParent({ user_id: 888, name: 'Второй родитель' }, 888);
+    const firstClass = database.addChild(777, 'Иванов Иван', '8МК');
+    const secondClass = database.addChild(888, 'Петров Пётр', '2Б');
+    const creatorChild = database.addChild(100, 'Сидоров Семён', '2Б');
+
+    assert.equal(service.canManageChild(777, firstClass.id), true);
+    assert.equal(service.canManageChild(777, secondClass.id), false);
+    assert.equal(service.canManageChild(200, firstClass.id), true);
+    assert.equal(service.canManageChild(200, secondClass.id), false);
+    assert.equal(service.canManageChild(100, firstClass.id), true);
+    assert.equal(service.canManageChild(100, secondClass.id), true);
+
+    database.setViewMode(100, 'parent');
+    assert.equal(service.canManageChild(100, creatorChild.id), true);
+    assert.equal(service.canManageChild(100, firstClass.id), false);
+  });
+});
+
+test('создатель переключается в обычный режим родителя отдельно от тестового', async () => {
+  await fixture(async ({ service, database }) => {
+    const creator = database.upsertParent({ user_id: 100, name: 'Создатель' }, 100);
+    await service.handleRole({ user: { user_id: 100, name: 'Создатель' }, chatId: 100 });
+    assert.equal(database.getParent(creator.user_id).view_mode, 'parent');
+
+    await service.handleRole({ user: { user_id: 100, name: 'Создатель' }, chatId: 100 });
+    assert.equal(database.getParent(creator.user_id).view_mode, null);
+  });
+});
+
 test('создатель сохраняет новое расписание, родителю это запрещено', async () => {
   await fixture(async ({ service, database }) => {
     database.upsertParent({ user_id: 100, name: 'Создатель' }, 100);
@@ -152,7 +233,7 @@ test('тестовый режим создателя открывает зака
   });
 });
 
-test('планировщик отправляет создателю общий отчёт, преподавателю — свой', async () => {
+test('планировщик отправляет создателю два отчёта, преподавателю — свой', async () => {
   const sent = [];
   const fakeService = {
     config: config(),
@@ -167,7 +248,8 @@ test('планировщик отправляет создателю общий 
   const scheduler = new DailyScheduler(fakeService);
   await scheduler.sendReports('2026-09-03');
   assert.deepEqual(sent, [
-    { userId: 100, target: '2026-09-03', className: null },
+    { userId: 100, target: '2026-09-03', className: '8МК' },
+    { userId: 100, target: '2026-09-03', className: '2Б' },
     { userId: 200, target: '2026-09-03', className: '8МК' },
   ]);
 });

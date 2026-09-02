@@ -52,8 +52,17 @@ export class BotService {
   }
 
   withUpdateContext(ctx, next) {
-    const messageId = ctx.updateType === 'message_callback' ? ctx.messageId : null;
-    return this.updateContext.run({ messageId }, () => next());
+    if (ctx.updateType !== 'message_callback') {
+      return this.updateContext.run({ messageId: null }, () => next());
+    }
+    const answerOnCallback = ctx.answerOnCallback.bind(ctx);
+    // Ответ отправляется вместе с новым содержимым при первом вызове sendMessage.
+    // Вызовы в обработчиках только отмечают место логического подтверждения.
+    ctx.answerOnCallback = async () => undefined;
+    return this.updateContext.run(
+      { messageId: ctx.messageId, answerOnCallback, answered: false },
+      () => next(),
+    );
   }
 
   roleFor(userId) {
@@ -130,7 +139,9 @@ export class BotService {
     if (role === 'teacher') {
       text += '\n/report [ГГГГ-ММ-ДД] — отчёт по классу\n/role — сменить роль преподаватель/родитель';
     } else if (role === 'creator') {
-      text += '\n/report [ГГГГ-ММ-ДД] — общий отчёт\n/test — тестировать заказы в любое время';
+      text += '\n/report [ГГГГ-ММ-ДД] — отдельные отчёты по классам' +
+        '\n/role — переключить панель создатель/родитель' +
+        '\n/test — тестировать заказы в любое время';
     }
     await this.sendMessage(parent.user_id, text, backToMenuKeyboard());
   }
@@ -155,8 +166,8 @@ export class BotService {
   async handleRole(ctx) {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
-    if (this.roleFor(parent.user_id).name !== 'teacher') {
-      await this.sendMessage(parent.user_id, 'Команда смены роли доступна только преподавателю.');
+    if (!this.isStaff(parent.user_id)) {
+      await this.sendMessage(parent.user_id, 'Команда смены роли доступна только сотрудникам.');
       return;
     }
     this.database.setViewMode(parent.user_id, parent.view_mode === 'parent' ? null : 'parent');
@@ -188,7 +199,7 @@ export class BotService {
   async handleClassAction(ctx) {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
-    await ctx.answerOnCallback({ notification: 'Класс выбран' });
+    await ctx.answerOnCallback({});
     await this.selectClass(
       parent.user_id,
       ctx.match?.[1] ?? '',
@@ -200,14 +211,14 @@ export class BotService {
   async handleMainMenuAction(ctx) {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
-    await ctx.answerOnCallback({ notification: 'Открываю меню' });
+    await ctx.answerOnCallback({});
     await this.sendMenu(parent.user_id);
   }
 
   async handleCommonAction(ctx) {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
-    await ctx.answerOnCallback({ notification: 'Готово' });
+    await ctx.answerOnCallback({});
     if (ctx.match?.[1] === 'id') {
       await this.sendMessage(
         parent.user_id,
@@ -222,7 +233,7 @@ export class BotService {
   async handleChildrenAction(ctx) {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
-    await ctx.answerOnCallback({ notification: 'Открываю список' });
+    await ctx.answerOnCallback({});
     const type = ctx.match?.[1] ?? 'mine';
     const page = Number(ctx.match?.[2] ?? 0);
     await this.sendChildrenList(parent.user_id, { type, page });
@@ -231,21 +242,21 @@ export class BotService {
   async handleAddChildAction(ctx) {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
-    await ctx.answerOnCallback({ notification: 'Выберите класс' });
+    await ctx.answerOnCallback({});
     await this.startAddChild(parent.user_id);
   }
 
   async handleChildViewAction(ctx) {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
-    await ctx.answerOnCallback({ notification: 'Открываю карточку' });
+    await ctx.answerOnCallback({});
     await this.sendChildCard(parent.user_id, Number(ctx.match?.[1]));
   }
 
   async handleChildOrderAction(ctx) {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
-    await ctx.answerOnCallback({ notification: 'Открываю выбор питания' });
+    await ctx.answerOnCallback({});
     await this.sendOrderPrompt(parent.user_id, { childId: Number(ctx.match?.[1]) });
   }
 
@@ -254,11 +265,12 @@ export class BotService {
     if (!parent) return;
     const childId = Number(ctx.match?.[1]);
     if (!this.canManageChild(parent.user_id, childId)) {
-      await ctx.answerOnCallback({ notification: 'Нет доступа' });
+      await ctx.answerOnCallback({});
+      await this.sendMessage(parent.user_id, 'У вас нет доступа к этому ребёнку.', backToMenuKeyboard());
       return;
     }
     this.database.setParentState(parent.user_id, `awaiting_name:edit:${childId}`);
-    await ctx.answerOnCallback({ notification: 'Введите новое ФИО' });
+    await ctx.answerOnCallback({});
     await this.sendMessage(parent.user_id, 'Напишите новые фамилию и имя ребёнка одним сообщением.');
   }
 
@@ -267,10 +279,11 @@ export class BotService {
     if (!parent) return;
     const childId = Number(ctx.match?.[1]);
     if (!this.canChangeChildClass(parent.user_id, childId)) {
-      await ctx.answerOnCallback({ notification: 'Нет доступа' });
+      await ctx.answerOnCallback({});
+      await this.sendMessage(parent.user_id, 'У вас нет доступа к смене класса.', backToMenuKeyboard());
       return;
     }
-    await ctx.answerOnCallback({ notification: 'Выберите класс' });
+    await ctx.answerOnCallback({});
     await this.sendMessage(
       parent.user_id,
       'Выберите новый класс ребёнка:',
@@ -284,10 +297,11 @@ export class BotService {
     const childId = Number(ctx.match?.[1]);
     const child = this.accessibleChild(parent.user_id, childId);
     if (!child) {
-      await ctx.answerOnCallback({ notification: 'Нет доступа' });
+      await ctx.answerOnCallback({});
+      await this.sendMessage(parent.user_id, 'Ребёнок не найден или у вас нет доступа.', backToMenuKeyboard());
       return;
     }
-    await ctx.answerOnCallback({ notification: 'Нужно подтверждение' });
+    await ctx.answerOnCallback({});
     await this.sendMessage(
       parent.user_id,
       `Удалить ребёнка «${child.child_name}» вместе со всеми его заказами?`,
@@ -300,18 +314,19 @@ export class BotService {
     if (!parent) return;
     const childId = Number(ctx.match?.[1]);
     if (!this.canManageChild(parent.user_id, childId)) {
-      await ctx.answerOnCallback({ notification: 'Нет доступа' });
+      await ctx.answerOnCallback({});
+      await this.sendMessage(parent.user_id, 'У вас нет доступа к этому ребёнку.', backToMenuKeyboard());
       return;
     }
     this.database.deleteChild(childId);
-    await ctx.answerOnCallback({ notification: 'Ребёнок удалён' });
+    await ctx.answerOnCallback({});
     await this.sendChildrenList(parent.user_id);
   }
 
   async handleOrderAction(ctx) {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
-    await ctx.answerOnCallback({ notification: 'Сохраняю заказ' });
+    await ctx.answerOnCallback({});
     await this.saveOrder(
       parent.user_id,
       Number(ctx.match?.[1]),
@@ -323,7 +338,15 @@ export class BotService {
   async handleStaffReportAction(ctx) {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
-    await ctx.answerOnCallback({ notification: 'Готовлю отчёт' });
+    await ctx.answerOnCallback({});
+    const role = this.roleFor(parent.user_id);
+    await this.sendMessage(
+      parent.user_id,
+      role.name === 'creator'
+        ? 'Формирую два отдельных отчёта по классам…'
+        : `Формирую отчёт класса ${role.className}…`,
+      backToMenuKeyboard(),
+    );
     await this.sendManualReport(parent.user_id, '/report');
   }
 
@@ -331,12 +354,13 @@ export class BotService {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
     const role = this.roleFor(parent.user_id).name;
-    if (role !== 'teacher') {
-      await ctx.answerOnCallback({ notification: 'Нет доступа' });
+    if (role === 'parent') {
+      await ctx.answerOnCallback({});
+      await this.sendMessage(parent.user_id, 'Смена роли доступна только сотрудникам.', backToMenuKeyboard());
       return;
     }
     this.database.setViewMode(parent.user_id, ctx.match?.[1] === 'parent' ? 'parent' : null);
-    await ctx.answerOnCallback({ notification: 'Роль изменена' });
+    await ctx.answerOnCallback({});
     await this.sendMenu(parent.user_id);
   }
 
@@ -344,11 +368,12 @@ export class BotService {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
     if (this.roleFor(parent.user_id).name !== 'creator') {
-      await ctx.answerOnCallback({ notification: 'Нет доступа' });
+      await ctx.answerOnCallback({});
+      await this.sendMessage(parent.user_id, 'Тестовый режим доступен только создателю.', backToMenuKeyboard());
       return;
     }
     this.database.setViewMode(parent.user_id, ctx.match?.[1] === 'on' ? 'test' : null);
-    await ctx.answerOnCallback({ notification: 'Режим изменён' });
+    await ctx.answerOnCallback({});
     await this.sendMenu(parent.user_id);
   }
 
@@ -356,10 +381,11 @@ export class BotService {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
     if (!this.isStaff(parent.user_id)) {
-      await ctx.answerOnCallback({ notification: 'Нет доступа' });
+      await ctx.answerOnCallback({});
+      await this.sendMessage(parent.user_id, 'Настройка расписания доступна только сотрудникам.', backToMenuKeyboard());
       return;
     }
-    await ctx.answerOnCallback({ notification: 'Настройки расписания' });
+    await ctx.answerOnCallback({});
     await this.sendScheduleMenu(parent.user_id);
   }
 
@@ -367,10 +393,11 @@ export class BotService {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
     if (!this.isStaff(parent.user_id)) {
-      await ctx.answerOnCallback({ notification: 'Нет доступа' });
+      await ctx.answerOnCallback({});
+      await this.sendMessage(parent.user_id, 'Настройка расписания доступна только сотрудникам.', backToMenuKeyboard());
       return;
     }
-    await ctx.answerOnCallback({ notification: 'Измените время кнопками' });
+    await ctx.answerOnCallback({});
     await this.sendScheduleEditor(parent.user_id, ctx.match?.[1]);
   }
 
@@ -378,10 +405,11 @@ export class BotService {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
     if (!this.isStaff(parent.user_id)) {
-      await ctx.answerOnCallback({ notification: 'Нет доступа' });
+      await ctx.answerOnCallback({});
+      await this.sendMessage(parent.user_id, 'Настройка расписания доступна только сотрудникам.', backToMenuKeyboard());
       return;
     }
-    await ctx.answerOnCallback({ notification: 'Время изменено' });
+    await ctx.answerOnCallback({});
     await this.sendScheduleEditor(parent.user_id, ctx.match?.[1], Number(ctx.match?.[2]));
   }
 
@@ -389,28 +417,42 @@ export class BotService {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
     if (!this.isStaff(parent.user_id)) {
-      await ctx.answerOnCallback({ notification: 'Нет доступа' });
+      await ctx.answerOnCallback({});
+      await this.sendMessage(parent.user_id, 'Настройка расписания доступна только сотрудникам.', backToMenuKeyboard());
       return;
     }
-    await ctx.answerOnCallback({ notification: 'Проверяю расписание' });
+    await ctx.answerOnCallback({});
     await this.saveScheduleField(parent.user_id, ctx.match?.[1], Number(ctx.match?.[2]));
   }
 
   async handleUnknownAction(ctx) {
-    this.ensureParent(ctx);
-    await ctx.answerOnCallback({ notification: 'Эта кнопка уже неактуальна' });
+    const parent = this.ensureParent(ctx);
+    await ctx.answerOnCallback({});
+    if (parent) {
+      await this.sendMessage(parent.user_id, 'Эта кнопка уже неактуальна.', backToMenuKeyboard());
+    }
   }
 
   async sendMessage(userId, text, attachment = null, extra = {}) {
     const { forceNew = false, ...apiExtra } = extra;
-    const messageId = forceNew ? null : this.updateContext.getStore()?.messageId;
+    const context = this.updateContext.getStore();
+    const messageId = forceNew ? null : context?.messageId;
+    const editBody = {
+      ...apiExtra,
+      text,
+      attachments: attachment ? [attachment] : [],
+    };
+    if (!forceNew && context?.answerOnCallback && !context.answered) {
+      context.answered = true;
+      try {
+        return await context.answerOnCallback({ message: editBody });
+      } catch (error) {
+        console.error('Не удалось ответить на нажатие кнопки новым содержимым', error);
+      }
+    }
     if (messageId && this.api.editMessage) {
       try {
-        return await this.api.editMessage(messageId, {
-          ...apiExtra,
-          text,
-          attachments: attachment ? [attachment] : null,
-        });
+        return await this.api.editMessage(messageId, editBody);
       } catch (error) {
         console.error(`Не удалось отредактировать сообщение ${messageId}`, error);
       }
@@ -427,8 +469,9 @@ export class BotService {
     const child = this.database.getChild(childId);
     if (!child) return null;
     const role = this.roleFor(userId);
-    if (role.name === 'creator') return child;
     const parent = this.database.getParent(userId);
+    const parentView = ['parent', 'test'].includes(parent?.view_mode);
+    if (role.name === 'creator' && !parentView) return child;
     if (role.name === 'teacher' && parent?.view_mode !== 'parent' && role.className === child.class_name) {
       return child;
     }
@@ -443,8 +486,9 @@ export class BotService {
     const child = this.database.getChild(childId);
     if (!child) return false;
     const role = this.roleFor(userId);
-    if (role.name === 'creator') return true;
-    const parentView = role.name === 'parent' || this.database.getParent(userId)?.view_mode === 'parent';
+    const mode = this.database.getParent(userId)?.view_mode;
+    if (role.name === 'creator' && !['parent', 'test'].includes(mode)) return true;
+    const parentView = role.name === 'parent' || ['parent', 'test'].includes(mode);
     return child.parent_user_id === userId && parentView;
   }
 
@@ -518,7 +562,7 @@ export class BotService {
       const schedule = this.getSchedule();
       const text = role.name === 'teacher'
         ? `Панель преподавателя класса ${role.className}. Здесь можно управлять детьми своего класса и получить отчёт.`
-        : 'Панель создателя. Здесь доступны общий отчёт, все дети, расписание и тестовый режим.';
+        : 'Панель создателя. Отчёты формируются отдельно по каждому классу. Здесь также доступны все дети, расписание и тестовый режим.';
       await this.sendMessage(
         userId,
         `${greeting ? 'Здравствуйте!\n\n' : ''}${text}\n\n` +
@@ -539,6 +583,7 @@ export class BotService {
       parentMenuKeyboard({
         canOrder: this.activeTargetFor(userId) !== null && children.length > 0,
         staffRole: role.name === 'parent' ? null : role.name,
+        testMode: parent.view_mode === 'test',
       }),
     );
   }
@@ -561,7 +606,7 @@ export class BotService {
     const requestedType = type === 'back' || type === null ? (staffView ? 'staff' : 'mine') : type;
     const orderMode = requestedType === 'order';
     const listType = orderMode ? 'mine' : requestedType;
-    if (listType === 'staff' && role.name === 'parent') {
+    if (listType === 'staff' && !staffView) {
       await this.sendMessage(userId, 'У вас нет доступа к служебному списку.');
       return;
     }
@@ -721,7 +766,13 @@ export class BotService {
       return;
     }
     const target = requestedDate ?? this.activeTarget() ?? nextServiceDay(localNow(this.config.timezone).date);
-    await this.sendReportTo(userId, target, scope.className);
+    if (scope.className) {
+      await this.sendReportTo(userId, target, scope.className);
+      return;
+    }
+    for (const className of this.config.classes) {
+      await this.sendReportTo(userId, target, className);
+    }
   }
 
   async sendReportTo(userId, target, className = null) {

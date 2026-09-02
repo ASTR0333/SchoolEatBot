@@ -57,12 +57,14 @@ export function loadConfig(env = process.env) {
     [teacher2Id, class2],
   ].filter(([userId]) => userId !== null);
 
-  const reportRecipients = [[creatorUserId, null]];
-  const seen = new Set([creatorUserId]);
+  const classes = [...new Set([class1, class2])];
+  const reportRecipients = classes.map((className) => [creatorUserId, className]);
+  const seen = new Set(reportRecipients.map(([userId, className]) => `${userId}:${className}`));
   for (const [userId, className] of teacherAssignments) {
-    if (!seen.has(userId)) {
+    const key = `${userId}:${className}`;
+    if (!seen.has(key)) {
       reportRecipients.push([userId, className]);
-      seen.add(userId);
+      seen.add(key);
     }
   }
 
@@ -71,7 +73,7 @@ export function loadConfig(env = process.env) {
     creatorUserId,
     teacherAssignments,
     reportRecipients,
-    classes: [...new Set([class1, class2])],
+    classes,
     class1,
     class2,
     promptTime: prompt.value,

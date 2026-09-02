@@ -22,7 +22,7 @@ function env(overrides = {}) {
 test('пустые ID преподавателей допустимы', () => {
   const config = loadConfig(env({ TEACHER_1_ID: '', TEACHER_2_ID: '  ' }));
   assert.deepEqual(config.teacherAssignments, []);
-  assert.deepEqual(config.reportRecipients, [[100, null]]);
+  assert.deepEqual(config.reportRecipients, [[100, '8МК'], [100, '2Б']]);
 });
 
 test('создатель видит все классы, преподаватель только свой', () => {
