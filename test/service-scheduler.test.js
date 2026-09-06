@@ -388,6 +388,51 @@ test('UI расписания: создатель выбирает класс, �
   });
 });
 
+test('окончание сохраняется через реальные payload кнопок у преподавателя и создателя', async () => {
+  await fixture(async ({ service, database, api }) => {
+    database.upsertParent({ user_id: 100, name: 'Создатель' }, 100);
+    database.upsertParent({ user_id: 200, name: 'Учитель' }, 200);
+
+    const callback = (userId, match) => ({
+      user: { user_id: userId, name: `Пользователь ${userId}` },
+      chatId: userId,
+      match,
+      async answerOnCallback() {},
+    });
+    const payloadFor = (message, label) => message.extra.attachments[0].payload.buttons
+      .flat()
+      .find((button) => button.text === label).payload;
+
+    await service.sendScheduleEditor(200, 'deadline', '8МК');
+    const teacherAdjustPayload = payloadFor(api.messages.at(-1), '− 1 час');
+    const teacherAdjustMatch = /^schedule:adjust:(prompt|reminder|deadline):(\d+):(.+)$/u
+      .exec(teacherAdjustPayload);
+    await service.handleScheduleAdjustAction(callback(200, teacherAdjustMatch));
+    const teacherSavePayload = payloadFor(api.messages.at(-1), '✅ Сохранить');
+    const teacherSaveMatch = /^schedule:save:(prompt|reminder|deadline):(\d+):(.+)$/u
+      .exec(teacherSavePayload);
+    await service.handleScheduleSaveAction(callback(200, teacherSaveMatch));
+
+    assert.equal(service.getSchedule('8МК').deadlineTime, '16:00');
+    assert.equal(service.getSchedule('8МК').reminderTime, '15:45');
+    assert.equal(database.getClassSchedule('8МК').updated_by, 200);
+    assert.match(api.messages.at(-2).text, /автоматически перенесено на 15:45/);
+
+    await service.sendScheduleEditor(100, 'deadline', '2Б');
+    const creatorAdjustPayload = payloadFor(api.messages.at(-1), '+ 1 час');
+    const creatorAdjustMatch = /^schedule:adjust:(prompt|reminder|deadline):(\d+):(.+)$/u
+      .exec(creatorAdjustPayload);
+    await service.handleScheduleAdjustAction(callback(100, creatorAdjustMatch));
+    const creatorSavePayload = payloadFor(api.messages.at(-1), '✅ Сохранить');
+    const creatorSaveMatch = /^schedule:save:(prompt|reminder|deadline):(\d+):(.+)$/u
+      .exec(creatorSavePayload);
+    await service.handleScheduleSaveAction(callback(100, creatorSaveMatch));
+
+    assert.equal(service.getSchedule('2Б').deadlineTime, '18:00');
+    assert.equal(database.getClassSchedule('2Б').updated_by, 100);
+  });
+});
+
 test('создатель в родительском режиме видит своих детей, а после возврата — всех детей', async () => {
   await fixture(async ({ service, database, api }) => {
     database.upsertParent({ user_id: 100, name: 'Создатель' }, 100);

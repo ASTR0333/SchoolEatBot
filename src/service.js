@@ -936,18 +936,52 @@ export class BotService {
       [timeKey]: minutesToClock(minutes),
       [minutesKey]: minutes,
     };
+    let automaticChange = null;
+    if (field === 'deadline' && next.reminderMinutes >= next.deadlineMinutes) {
+      if (next.deadlineMinutes - next.promptMinutes < 30) {
+        await this.sendMessage(
+          userId,
+          `Не сохранено: окончание должно быть минимум на 30 минут позже начала ` +
+            `(${next.promptTime}).`,
+        );
+        await this.sendScheduleEditor(userId, field, className, minutes);
+        return;
+      }
+      next.reminderMinutes = next.deadlineMinutes - 15;
+      next.reminderTime = minutesToClock(next.reminderMinutes);
+      automaticChange = ` Напоминание автоматически перенесено на ${next.reminderTime}.`;
+    } else if (field === 'prompt' && next.promptMinutes >= next.reminderMinutes) {
+      if (next.deadlineMinutes - next.promptMinutes < 30) {
+        await this.sendMessage(
+          userId,
+          `Не сохранено: начало должно быть минимум на 30 минут раньше окончания ` +
+            `(${next.deadlineTime}).`,
+        );
+        await this.sendScheduleEditor(userId, field, className, minutes);
+        return;
+      }
+      next.reminderMinutes = next.promptMinutes + 15;
+      next.reminderTime = minutesToClock(next.reminderMinutes);
+      automaticChange = ` Напоминание автоматически перенесено на ${next.reminderTime}.`;
+    }
     if (!(next.promptMinutes < next.reminderMinutes && next.reminderMinutes < next.deadlineMinutes)) {
       await this.sendMessage(
         userId,
-        'Не сохранено: начало должно быть раньше напоминания, а напоминание — раньше окончания.',
+        `Не сохранено: напоминание должно быть между началом ${next.promptTime} ` +
+          `и окончанием ${next.deadlineTime}.`,
       );
       await this.sendScheduleEditor(userId, field, className, minutes);
       return;
     }
     this.database.saveClassSchedule(className, next, userId);
+    console.log(
+      `Расписание класса ${className} изменено пользователем ${userId}: ` +
+        `${next.promptTime}–${next.deadlineTime}, напоминание ${next.reminderTime}`,
+    );
     await this.sendMessage(
       userId,
-      `Расписание класса ${className} сохранено. Новое время применяется сразу.`,
+      `Расписание класса ${className} сохранено. Новое время применяется сразу.` +
+        (automaticChange ?? ''),
     );
     await this.sendScheduleMenu(userId, className);
   }
