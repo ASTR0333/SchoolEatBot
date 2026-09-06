@@ -207,16 +207,115 @@ test('права управления не теряются при перекл�
   });
 });
 
-test('создатель всегда остаётся в служебной панели', async () => {
+test('создатель и преподаватель переключаются между служебной и родительской панелями', async () => {
   await fixture(async ({ service, database, api }) => {
     const creator = database.upsertParent({ user_id: 100, name: 'Создатель' }, 100);
+    const teacher = database.upsertParent({ user_id: 200, name: 'Учитель' }, 200);
+
+    await service.handleRole({ user: { user_id: 100, name: 'Создатель' }, chatId: 100 });
+    assert.equal(database.getParent(creator.user_id).view_mode, 'parent');
+    assert.match(api.messages.at(-1).text, /Детей в списке/);
+    assert.match(JSON.stringify(api.messages.at(-1).extra), /role:staff/);
+
     await service.handleRole({ user: { user_id: 100, name: 'Создатель' }, chatId: 100 });
     assert.equal(database.getParent(creator.user_id).view_mode, null);
     assert.match(api.messages.at(-1).text, /Панель создателя/);
 
+    await service.handleRole({ user: { user_id: 200, name: 'Учитель' }, chatId: 200 });
+    assert.equal(database.getParent(teacher.user_id).view_mode, 'parent');
+    assert.match(JSON.stringify(api.messages.at(-1).extra), /role:staff/);
+
+    await service.handleRoleAction({
+      user: { user_id: 200, name: 'Учитель' },
+      chatId: 200,
+      match: ['role:staff', 'staff'],
+      async answerOnCallback() {},
+    });
+    assert.equal(database.getParent(teacher.user_id).view_mode, null);
+    assert.match(api.messages.at(-1).text, /Панель преподавателя/);
+  });
+});
+
+test('тестовый режим создателя открывает заказ в любое время и выключается отдельно', async () => {
+  await fixture(async ({ service, database, api }) => {
+    database.upsertParent({ user_id: 100, name: 'Создатель' }, 100);
+    const regularChild = database.addChild(100, 'Обычный Ребёнок', '8МК');
+    const outsideWindow = new Date('2026-09-01T08:00:00Z');
+
+    assert.equal(service.activeTarget(outsideWindow, '2Б'), null);
     await service.handleTest({ user: { user_id: 100, name: 'Создатель' }, chatId: 100 });
-    assert.equal(database.getParent(creator.user_id).view_mode, null);
+    database.setParentState(100, 'awaiting_name:add:2Б');
+    await service.saveChildName(100, 'awaiting_name:add:2Б', 'Тестовый Ребёнок');
+    const child = database.childrenForParent(100, { isTest: true })[0];
+
+    assert.equal(database.getParent(100).view_mode, 'test');
+    assert.equal(child.is_test, 1);
+    assert.deepEqual(database.childrenForParent(100).map((item) => item.id), [regularChild.id]);
+    assert.deepEqual(database.allChildren().map((item) => item.id), [regularChild.id]);
+    assert.deepEqual(database.allChildren({ isTest: true }).map((item) => item.id), [child.id]);
+    assert.equal(service.childPermissions(100, regularChild.id).canView, false);
+    assert.equal(service.childPermissions(100, child.id).canOrder, true);
+    assert.equal(service.activeTargetFor(100, outsideWindow, '2Б'), '2026-09-02');
+    await service.sendMenu(100);
+    assert.match(api.messages.at(-1).text, /Тестовый режим.*в любое время/s);
+    assert.match(JSON.stringify(api.messages.at(-1).extra), /test:off/);
+    assert.match(JSON.stringify(api.messages.at(-1).extra), /test:report/);
+
+    await service.sendOrderPrompt(100, { childId: child.id, now: outsideWindow });
+    assert.match(api.messages.at(-1).text, /тестовом режиме.*в любое время/s);
+
+    const target = service.activeTargetFor(100, new Date(), child.class_name);
+    await service.saveOrder(100, child.id, target, 'breakfast');
+    assert.equal(database.getOrder(child.id, target).breakfast, 1);
+    assert.equal(database.getOrder(child.id, target).is_test, 1);
+    assert.deepEqual(database.reportRows(target, '2Б'), []);
+    assert.equal(database.reportRows(target, '2Б', { isTest: true }).length, 1);
+    assert.deepEqual(database.registeredParentIds(target, '2Б'), []);
+
+    const reports = [];
+    service.sendReportTo = async (userId, reportTarget, className, options) => {
+      reports.push({ userId, reportTarget, className, options });
+    };
+    await service.handleTestReportAction({
+      user: { user_id: 100, name: 'Создатель' },
+      chatId: 100,
+      async answerOnCallback() {},
+    });
+    assert.deepEqual(reports.map((report) => [report.className, report.options.isTest]), [
+      ['8МК', true],
+      ['2Б', true],
+    ]);
+
+    await service.handleTestAction({
+      user: { user_id: 100, name: 'Создатель' },
+      chatId: 100,
+      match: ['test:off', 'off'],
+      async answerOnCallback() {},
+    });
+    assert.equal(database.getParent(100).view_mode, null);
     assert.match(api.messages.at(-1).text, /Панель создателя/);
+    assert.equal(service.childPermissions(100, child.id).canView, false);
+    assert.equal(service.childPermissions(100, regularChild.id).canView, true);
+
+    await service.handleTestReportAction({
+      user: { user_id: 100, name: 'Создатель' },
+      chatId: 100,
+      async answerOnCallback() {},
+    });
+    assert.equal(reports.length, 2);
+    assert.match(api.messages.at(-1).text, /только в тестовом режиме/);
+  });
+});
+
+test('тестовый режим недоступен преподавателю и обычному родителю', async () => {
+  await fixture(async ({ service, database, api }) => {
+    await service.handleTest({ user: { user_id: 200, name: 'Учитель' }, chatId: 200 });
+    assert.equal(database.getParent(200).view_mode, null);
+    assert.match(api.messages.at(-1).text, /только создателю/);
+
+    await service.handleTest({ user: { user_id: 777, name: 'Родитель' }, chatId: 777 });
+    assert.equal(database.getParent(777).view_mode, null);
+    assert.match(api.messages.at(-1).text, /только создателю/);
   });
 });
 
@@ -289,19 +388,25 @@ test('UI расписания: создатель выбирает класс, �
   });
 });
 
-test('создатель с устаревшим родительским режимом всё равно видит расписание и всех детей', async () => {
+test('создатель в родительском режиме видит своих детей, а после возврата — всех детей', async () => {
   await fixture(async ({ service, database, api }) => {
     database.upsertParent({ user_id: 100, name: 'Создатель' }, 100);
     database.upsertParent({ user_id: 777, name: 'Родитель' }, 777);
+    database.addChild(100, 'Сидоров Семён', '2Б');
     database.addChild(777, 'Иванов Иван', '8МК');
     database.setViewMode(100, 'parent');
 
     await service.sendMenu(100);
-    assert.equal(database.getParent(100).view_mode, null);
-    assert.match(api.messages.at(-1).text, /Панель создателя/);
+    assert.equal(database.getParent(100).view_mode, 'parent');
+    assert.match(api.messages.at(-1).text, /Детей в списке: 1/);
     assert.match(api.messages.at(-1).text, /Расписание заказов/);
 
-    await service.sendChildrenList(100, { type: 'mine' });
+    await service.sendChildrenList(100);
+    assert.match(api.messages.at(-1).text, /Ваши дети/);
+    assert.doesNotMatch(api.messages.at(-1).text, /Все дети/);
+
+    database.setViewMode(100, null);
+    await service.sendChildrenList(100);
     assert.match(api.messages.at(-1).text, /Все дети/);
   });
 });

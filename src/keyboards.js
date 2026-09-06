@@ -20,13 +20,21 @@ export function orderKeyboard(childId, target) {
   ]);
 }
 
-export function parentMenuKeyboard({ canOrder, staffRole = null }) {
+export function parentMenuKeyboard({ canOrder, staffRole = null, testMode = false }) {
   const rows = [
     [callback('👨‍👩‍👧‍👦 Мои дети', 'children:mine:0')],
     [callback('➕ Добавить ребёнка', 'child:add')],
   ];
   if (canOrder) rows.unshift([callback('🍽 Заказать питание', 'children:order:0')]);
-  if (staffRole === 'teacher') rows.push([callback('🎓 Панель преподавателя', 'role:staff')]);
+  if (testMode) rows.push([callback('📊 Тестовый отчёт', 'test:report')]);
+  if (staffRole) {
+    rows.push([
+      callback(
+        staffRole === 'creator' ? '🛠 Панель создателя' : '🎓 Панель преподавателя',
+        staffRole === 'creator' && testMode ? 'test:off' : 'role:staff',
+      ),
+    ]);
+  }
   rows.push([
     callback('ℹ️ Помощь', 'common:help'),
     callback('🆔 Мой ID', 'common:id'),
@@ -40,7 +48,12 @@ export function staffMenuKeyboard({ role }) {
     [callback('⏰ Настроить расписание', 'schedule:menu')],
     [callback(role === 'creator' ? '👥 Все дети' : '👥 Дети моего класса', 'children:staff:0')],
   ];
-  if (role === 'teacher') rows.push([callback('👨‍👩‍👧 Режим родителя', 'role:parent')]);
+  if (role === 'creator') {
+    rows.push([callback('👨‍👩‍👧 Обычный режим родителя', 'role:parent')]);
+    rows.push([callback('🧪 Тестовый режим родителя', 'test:on')]);
+  } else {
+    rows.push([callback('👨‍👩‍👧 Режим родителя', 'role:parent')]);
+  }
   rows.push([
     callback('ℹ️ Помощь', 'common:help'),
     callback('🆔 Мой ID', 'common:id'),

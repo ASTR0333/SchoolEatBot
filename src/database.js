@@ -22,6 +22,11 @@ export class Database {
     ).get(name) !== undefined;
   }
 
+  columnExists(tableName, columnName) {
+    return this.connection.prepare(`PRAGMA table_info(${tableName})`).all()
+      .some((column) => column.name === columnName);
+  }
+
   createSchema() {
     const currentVersion = this.tableExists('settings')
       ? this.connection.prepare("SELECT value FROM settings WHERE key = 'schema_version'").get()?.value
@@ -53,6 +58,7 @@ export class Database {
         parent_user_id INTEGER NOT NULL REFERENCES parents(user_id) ON DELETE CASCADE,
         child_name TEXT NOT NULL,
         class_name TEXT NOT NULL,
+        is_test INTEGER NOT NULL DEFAULT 0,
         active INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -64,6 +70,7 @@ export class Database {
         target_date TEXT NOT NULL,
         breakfast INTEGER NOT NULL DEFAULT 0,
         lunch INTEGER NOT NULL DEFAULT 0,
+        is_test INTEGER NOT NULL DEFAULT 0,
         updated_at TEXT NOT NULL,
         UNIQUE(child_id, target_date)
       );
@@ -91,6 +98,18 @@ export class Database {
         updated_by INTEGER NOT NULL,
         updated_at TEXT NOT NULL
       );
+    `);
+    if (!this.columnExists('children', 'is_test')) {
+      this.connection.exec('ALTER TABLE children ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0;');
+    }
+    if (!this.columnExists('orders', 'is_test')) {
+      this.connection.exec('ALTER TABLE orders ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0;');
+    }
+    this.connection.exec(`
+      CREATE INDEX IF NOT EXISTS ix_children_test
+        ON children(is_test, parent_user_id, class_name, active);
+      CREATE INDEX IF NOT EXISTS ix_orders_test
+        ON orders(is_test, target_date);
     `);
     this.setSetting('schema_version', SCHEMA_VERSION);
   }
@@ -134,41 +153,42 @@ export class Database {
     ).run(mode, nowIso(), userId);
   }
 
-  addChild(userId, childName, className) {
+  addChild(userId, childName, className, { isTest = false } = {}) {
     const timestamp = nowIso();
     const result = this.connection.prepare(`
-      INSERT INTO children (parent_user_id, child_name, class_name, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(userId, childName, className, timestamp, timestamp);
+      INSERT INTO children (
+        parent_user_id, child_name, class_name, is_test, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(userId, childName, className, Number(isTest), timestamp, timestamp);
     return this.getChild(Number(result.lastInsertRowid));
   }
 
-  childrenForParent(userId) {
+  childrenForParent(userId, { isTest = false } = {}) {
     return this.connection.prepare(`
       SELECT * FROM children
-      WHERE parent_user_id = ? AND active = 1
+      WHERE parent_user_id = ? AND is_test = ? AND active = 1
       ORDER BY class_name, child_name COLLATE NOCASE, id
-    `).all(userId);
+    `).all(userId, Number(isTest));
   }
 
-  childrenForClass(className) {
+  childrenForClass(className, { isTest = false } = {}) {
     return this.connection.prepare(`
       SELECT c.*, p.display_name AS parent_name, p.user_id AS owner_id
       FROM children c
       JOIN parents p ON p.user_id = c.parent_user_id
-      WHERE c.class_name = ? AND c.active = 1
+      WHERE c.class_name = ? AND c.is_test = ? AND c.active = 1
       ORDER BY c.child_name COLLATE NOCASE, c.id
-    `).all(className);
+    `).all(className, Number(isTest));
   }
 
-  allChildren() {
+  allChildren({ isTest = false } = {}) {
     return this.connection.prepare(`
       SELECT c.*, p.display_name AS parent_name, p.user_id AS owner_id
       FROM children c
       JOIN parents p ON p.user_id = c.parent_user_id
-      WHERE c.active = 1
+      WHERE c.is_test = ? AND c.active = 1
       ORDER BY c.class_name, c.child_name COLLATE NOCASE, c.id
-    `).all();
+    `).all(Number(isTest));
   }
 
   getChild(childId, ownerId = null) {
@@ -203,14 +223,24 @@ export class Database {
   }
 
   saveOrder(childId, targetDate, breakfast, lunch) {
+    const child = this.getChild(childId);
+    if (!child) throw new Error('Ребёнок не найден.');
     this.connection.prepare(`
-      INSERT INTO orders (child_id, target_date, breakfast, lunch, updated_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO orders (child_id, target_date, breakfast, lunch, is_test, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(child_id, target_date) DO UPDATE SET
         breakfast = excluded.breakfast,
         lunch = excluded.lunch,
+        is_test = excluded.is_test,
         updated_at = excluded.updated_at
-    `).run(childId, targetDate, Number(breakfast), Number(lunch), nowIso());
+    `).run(
+      childId,
+      targetDate,
+      Number(breakfast),
+      Number(lunch),
+      Number(child.is_test),
+      nowIso(),
+    );
   }
 
   registeredParentIds(unansweredFor = null, className = null) {
@@ -218,15 +248,16 @@ export class Database {
     const condition = unansweredFor
       ? `AND EXISTS (
           SELECT 1 FROM children c
-          WHERE c.parent_user_id = p.user_id AND c.active = 1
+          WHERE c.parent_user_id = p.user_id AND c.is_test = 0 AND c.active = 1
             ${classCondition}
             AND NOT EXISTS (
-              SELECT 1 FROM orders o WHERE o.child_id = c.id AND o.target_date = ?
+              SELECT 1 FROM orders o
+              WHERE o.child_id = c.id AND o.target_date = ? AND o.is_test = 0
             )
         )`
       : `AND EXISTS (
           SELECT 1 FROM children c
-          WHERE c.parent_user_id = p.user_id AND c.active = 1 ${classCondition}
+          WHERE c.parent_user_id = p.user_id AND c.is_test = 0 AND c.active = 1 ${classCondition}
         )`;
     const statement = this.connection.prepare(
       `SELECT p.user_id FROM parents p WHERE p.active = 1 ${condition}`,
@@ -238,7 +269,7 @@ export class Database {
     return rows.map((row) => Number(row.user_id));
   }
 
-  reportRows(targetDate, className = null) {
+  reportRows(targetDate, className = null, { isTest = false } = {}) {
     const classFilter = className === null ? '' : 'AND c.class_name = ?';
     const statement = this.connection.prepare(`
       SELECT c.class_name, c.child_name,
@@ -246,11 +277,14 @@ export class Database {
         COALESCE(o.lunch, 0) AS lunch
       FROM children c
       JOIN parents p ON p.user_id = c.parent_user_id
-      LEFT JOIN orders o ON o.child_id = c.id AND o.target_date = ?
-      WHERE p.active = 1 AND c.active = 1 ${classFilter}
+      LEFT JOIN orders o ON o.child_id = c.id AND o.target_date = ? AND o.is_test = ?
+      WHERE p.active = 1 AND c.is_test = ? AND c.active = 1 ${classFilter}
       ORDER BY c.class_name, c.child_name COLLATE NOCASE
     `);
-    const rows = className === null ? statement.all(targetDate) : statement.all(targetDate, className);
+    const testFlag = Number(isTest);
+    const rows = className === null
+      ? statement.all(targetDate, testFlag, testFlag)
+      : statement.all(targetDate, testFlag, testFlag, className);
     return rows.map((row) => ({
       className: row.class_name,
       childName: row.child_name,

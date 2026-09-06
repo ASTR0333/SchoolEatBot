@@ -42,6 +42,7 @@ bot.action(/^order:(\d+):(\d{4}-\d{2}-\d{2}):(breakfast|lunch|both|none)$/u, (ct
 bot.action('staff:report', (ctx) => service.handleStaffReportAction(ctx));
 bot.action(/^role:(parent|staff)$/u, (ctx) => service.handleRoleAction(ctx));
 bot.action(/^test:(on|off)$/u, (ctx) => service.handleTestAction(ctx));
+bot.action('test:report', (ctx) => service.handleTestReportAction(ctx));
 bot.action('schedule:menu', (ctx) => service.handleScheduleMenuAction(ctx));
 bot.action(/^schedule:class:(.+)$/u, (ctx) => service.handleScheduleClassAction(ctx));
 bot.action(/^schedule:edit:(prompt|reminder|deadline):(.+)$/u, (ctx) =>
