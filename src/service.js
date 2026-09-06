@@ -79,13 +79,14 @@ export class BotService {
   }
 
   getSchedule(className = this.config.classes[0]) {
+    const saved = this.database.getClassSchedule(className);
     const keys = Object.fromEntries(
       Object.keys(SCHEDULE_FIELDS).map((field) => [field, this.scheduleSettingKey(className, field)]),
     );
     const stored = this.database.getSettings(Object.values(keys));
-    const promptTime = stored[keys.prompt] ?? this.config.promptTime;
-    const reminderTime = stored[keys.reminder] ?? this.config.reminderTime;
-    const deadlineTime = stored[keys.deadline] ?? this.config.deadlineTime;
+    const promptTime = saved?.prompt_time ?? stored[keys.prompt] ?? this.config.promptTime;
+    const reminderTime = saved?.reminder_time ?? stored[keys.reminder] ?? this.config.reminderTime;
+    const deadlineTime = saved?.deadline_time ?? stored[keys.deadline] ?? this.config.deadlineTime;
     return {
       className,
       promptTime,
@@ -106,10 +107,6 @@ export class BotService {
   }
 
   activeTargetFor(userId, now = new Date(), className = null) {
-    const parent = this.database.getParent(userId);
-    if (this.roleFor(userId).name === 'creator' && parent?.view_mode === 'test') {
-      return nextServiceDay(localNow(this.config.timezone, now).date);
-    }
     if (className !== null) return this.activeTarget(now, className);
     const classes = new Set(this.database.childrenForParent(userId).map((child) => child.class_name));
     for (const candidate of classes) {
@@ -146,7 +143,10 @@ export class BotService {
 
   async handleBotStarted(ctx) {
     const parent = this.ensureParent(ctx);
-    if (parent) await this.sendMenu(parent.user_id, { greeting: true });
+    if (parent) {
+      if (this.isStaff(parent.user_id)) this.database.setViewMode(parent.user_id, null);
+      await this.sendMenu(parent.user_id, { greeting: true });
+    }
   }
 
   handleBotStopped(ctx) {
@@ -174,16 +174,17 @@ export class BotService {
     if (role === 'teacher') {
       text += '\n/report [ГГГГ-ММ-ДД] — отчёт по классу\n/role — сменить роль преподаватель/родитель';
     } else if (role === 'creator') {
-      text += '\n/report [ГГГГ-ММ-ДД] — отдельные отчёты по классам' +
-        '\n/role — переключить панель создатель/родитель' +
-        '\n/test — тестировать заказы в любое время';
+      text += '\n/report [ГГГГ-ММ-ДД] — отдельные отчёты по классам';
     }
     await this.sendMessage(parent.user_id, text, backToMenuKeyboard());
   }
 
   async handleMenu(ctx, { greeting = false } = {}) {
     const parent = this.ensureParent(ctx);
-    if (parent) await this.sendMenu(parent.user_id, { greeting });
+    if (parent) {
+      if (greeting && this.isStaff(parent.user_id)) this.database.setViewMode(parent.user_id, null);
+      await this.sendMenu(parent.user_id, { greeting });
+    }
   }
 
   async handleList(ctx) {
@@ -205,6 +206,11 @@ export class BotService {
       await this.sendMessage(parent.user_id, 'Команда смены роли доступна только сотрудникам.');
       return;
     }
+    if (this.roleFor(parent.user_id).name === 'creator') {
+      this.database.setViewMode(parent.user_id, null);
+      await this.sendMenu(parent.user_id);
+      return;
+    }
     this.database.setViewMode(parent.user_id, parent.view_mode === 'parent' ? null : 'parent');
     await this.sendMenu(parent.user_id);
   }
@@ -216,7 +222,11 @@ export class BotService {
       await this.sendMessage(parent.user_id, 'Тестовый режим доступен только создателю бота.');
       return;
     }
-    this.database.setViewMode(parent.user_id, parent.view_mode === 'test' ? null : 'test');
+    this.database.setViewMode(parent.user_id, null);
+    await this.sendMessage(
+      parent.user_id,
+      'Создатель всегда работает в панели создателя. Родительский интерфейс проверяется с обычного аккаунта.',
+    );
     await this.sendMenu(parent.user_id);
   }
 
@@ -291,15 +301,25 @@ export class BotService {
   async handleChildOrderAction(ctx) {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
+    const childId = Number(ctx.match?.[1]);
+    if (!this.childPermissions(parent.user_id, childId).canOrder) {
+      await ctx.answerOnCallback({});
+      await this.sendMessage(
+        parent.user_id,
+        'Заказывать питание может только родитель ребёнка.',
+        backToMenuKeyboard(),
+      );
+      return;
+    }
     await ctx.answerOnCallback({});
-    await this.sendOrderPrompt(parent.user_id, { childId: Number(ctx.match?.[1]) });
+    await this.sendOrderPrompt(parent.user_id, { childId });
   }
 
   async handleChildNameAction(ctx) {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
     const childId = Number(ctx.match?.[1]);
-    if (!this.canManageChild(parent.user_id, childId)) {
+    if (!this.childPermissions(parent.user_id, childId).canEditName) {
       await ctx.answerOnCallback({});
       await this.sendMessage(parent.user_id, 'У вас нет доступа к этому ребёнку.', backToMenuKeyboard());
       return;
@@ -313,7 +333,7 @@ export class BotService {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
     const childId = Number(ctx.match?.[1]);
-    if (!this.canChangeChildClass(parent.user_id, childId)) {
+    if (!this.childPermissions(parent.user_id, childId).canChangeClass) {
       await ctx.answerOnCallback({});
       await this.sendMessage(parent.user_id, 'У вас нет доступа к смене класса.', backToMenuKeyboard());
       return;
@@ -330,8 +350,8 @@ export class BotService {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
     const childId = Number(ctx.match?.[1]);
-    const child = this.accessibleChild(parent.user_id, childId);
-    if (!child) {
+    const permissions = this.childPermissions(parent.user_id, childId);
+    if (!permissions.canDelete) {
       await ctx.answerOnCallback({});
       await this.sendMessage(parent.user_id, 'Ребёнок не найден или у вас нет доступа.', backToMenuKeyboard());
       return;
@@ -339,7 +359,7 @@ export class BotService {
     await ctx.answerOnCallback({});
     await this.sendMessage(
       parent.user_id,
-      `Удалить ребёнка «${child.child_name}» вместе со всеми его заказами?`,
+      `Удалить ребёнка «${permissions.child.child_name}» вместе со всеми его заказами?`,
       deleteConfirmationKeyboard(childId),
     );
   }
@@ -348,7 +368,7 @@ export class BotService {
     const parent = this.ensureParent(ctx);
     if (!parent) return;
     const childId = Number(ctx.match?.[1]);
-    if (!this.canManageChild(parent.user_id, childId)) {
+    if (!this.childPermissions(parent.user_id, childId).canDelete) {
       await ctx.answerOnCallback({});
       await this.sendMessage(parent.user_id, 'У вас нет доступа к этому ребёнку.', backToMenuKeyboard());
       return;
@@ -394,7 +414,10 @@ export class BotService {
       await this.sendMessage(parent.user_id, 'Смена роли доступна только сотрудникам.', backToMenuKeyboard());
       return;
     }
-    this.database.setViewMode(parent.user_id, ctx.match?.[1] === 'parent' ? 'parent' : null);
+    this.database.setViewMode(
+      parent.user_id,
+      role === 'creator' ? null : ctx.match?.[1] === 'parent' ? 'parent' : null,
+    );
     await ctx.answerOnCallback({});
     await this.sendMenu(parent.user_id);
   }
@@ -407,8 +430,8 @@ export class BotService {
       await this.sendMessage(parent.user_id, 'Тестовый режим доступен только создателю.', backToMenuKeyboard());
       return;
     }
-    this.database.setViewMode(parent.user_id, ctx.match?.[1] === 'on' ? 'test' : null);
     await ctx.answerOnCallback({});
+    this.database.setViewMode(parent.user_id, null);
     await this.sendMenu(parent.user_id);
   }
 
@@ -527,16 +550,36 @@ export class BotService {
   }
 
   accessibleChild(userId, childId) {
-    const child = this.database.getChild(childId);
-    if (!child) return null;
-    const role = this.roleFor(userId);
-    const parent = this.database.getParent(userId);
-    const parentView = ['parent', 'test'].includes(parent?.view_mode);
-    if (role.name === 'creator' && !parentView) return child;
-    if (role.name === 'teacher' && parent?.view_mode !== 'parent' && role.className === child.class_name) {
-      return child;
+    const permissions = this.childPermissions(userId, childId);
+    return permissions.canView ? permissions.child : null;
+  }
+
+  childPermissions(userId, childOrId) {
+    const child = typeof childOrId === 'object'
+      ? childOrId
+      : this.database.getChild(childOrId);
+    if (!child) {
+      return {
+        child: null,
+        canView: false,
+        canEditName: false,
+        canChangeClass: false,
+        canDelete: false,
+        canOrder: false,
+      };
     }
-    return child.parent_user_id === userId ? child : null;
+    const role = this.roleFor(userId);
+    const isOwner = child.parent_user_id === userId;
+    const managesAssignedClass = role.name === 'teacher' && role.className === child.class_name;
+    const canManage = role.name === 'creator' || managesAssignedClass || isOwner;
+    return {
+      child,
+      canView: canManage,
+      canEditName: canManage,
+      canChangeClass: role.name === 'creator' || isOwner,
+      canDelete: canManage,
+      canOrder: isOwner,
+    };
   }
 
   canManageChild(userId, childId) {
@@ -544,13 +587,7 @@ export class BotService {
   }
 
   canChangeChildClass(userId, childId) {
-    const child = this.database.getChild(childId);
-    if (!child) return false;
-    const role = this.roleFor(userId);
-    const mode = this.database.getParent(userId)?.view_mode;
-    if (role.name === 'creator' && !['parent', 'test'].includes(mode)) return true;
-    const parentView = role.name === 'parent' || ['parent', 'test'].includes(mode);
-    return child.parent_user_id === userId && parentView;
+    return this.childPermissions(userId, childId).canChangeClass;
   }
 
   async startAddChild(userId) {
@@ -568,7 +605,7 @@ export class BotService {
       return;
     }
     if (action === 'edit') {
-      if (!this.canChangeChildClass(userId, childId)) {
+      if (!this.childPermissions(userId, childId).canChangeClass) {
         await this.sendMessage(userId, 'У вас нет доступа к этому ребёнку.');
         return;
       }
@@ -599,7 +636,7 @@ export class BotService {
       return;
     }
     const childId = Number(value);
-    if (!this.canManageChild(userId, childId)) {
+    if (!this.childPermissions(userId, childId).canEditName) {
       this.database.setParentState(userId, null);
       await this.sendMessage(userId, 'У вас нет доступа к этому ребёнку.');
       return;
@@ -618,7 +655,12 @@ export class BotService {
       parent.state = null;
     }
     const role = this.roleFor(userId);
-    const isParentView = role.name === 'parent' || parent.view_mode === 'parent' || parent.view_mode === 'test';
+    if (role.name === 'creator' && parent.view_mode !== null) {
+      this.database.setViewMode(userId, null);
+      parent.view_mode = null;
+    }
+    const isParentView = role.name === 'parent' ||
+      (role.name === 'teacher' && parent.view_mode === 'parent');
     if (!isParentView) {
       const text = role.name === 'teacher'
         ? `Панель преподавателя класса ${role.className}. Здесь можно управлять детьми своего класса и получить отчёт.`
@@ -640,16 +682,13 @@ export class BotService {
     const scheduleText = childClasses.length
       ? this.schedulesText(childClasses)
       : 'появится после добавления ребёнка';
-    const testText = parent.view_mode === 'test' ? '\n🧪 Тестовый режим: заказ доступен в любое время.' : '';
     await this.sendMessage(
       userId,
       `${greeting ? 'Здравствуйте!\n\n' : ''}Детей в списке: ${children.length}.` +
-        `\nРасписание заказов:\n${scheduleText}.` +
-        testText,
+        `\nРасписание заказов:\n${scheduleText}.`,
       parentMenuKeyboard({
         canOrder: this.activeTargetFor(userId) !== null && children.length > 0,
         staffRole: role.name === 'parent' ? null : role.name,
-        testMode: parent.view_mode === 'test',
       }),
     );
   }
@@ -668,8 +707,23 @@ export class BotService {
       parent.state = null;
     }
     const role = this.roleFor(userId);
+    if (role.name === 'creator' && parent?.view_mode !== null) {
+      this.database.setViewMode(userId, null);
+      parent.view_mode = null;
+    }
     const staffView = role.name !== 'parent' && !['parent', 'test'].includes(parent?.view_mode);
-    const requestedType = type === 'back' || type === null ? (staffView ? 'staff' : 'mine') : type;
+    let requestedType = type === 'back' || type === null ? (staffView ? 'staff' : 'mine') : type;
+    if (role.name === 'creator') {
+      if (requestedType === 'order') {
+        await this.sendMessage(
+          userId,
+          'Заказ питания оформляет родитель. В панели создателя доступно управление всеми детьми.',
+          backToMenuKeyboard(),
+        );
+        return;
+      }
+      requestedType = 'staff';
+    }
     const orderMode = requestedType === 'order';
     const listType = orderMode ? 'mine' : requestedType;
     if (listType === 'staff' && !staffView) {
@@ -693,11 +747,12 @@ export class BotService {
   }
 
   async sendChildCard(userId, childId) {
-    const child = this.accessibleChild(userId, childId);
-    if (!child) {
+    const permissions = this.childPermissions(userId, childId);
+    if (!permissions.canView) {
       await this.sendMessage(userId, 'Ребёнок не найден или у вас нет доступа.');
       return;
     }
+    const { child } = permissions;
     const target = this.activeTargetFor(userId, new Date(), child.class_name);
     const order = target ? this.database.getOrder(child.id, target) : null;
     let text = `👦 ${child.child_name}\n🏫 Класс: ${child.class_name}`;
@@ -706,28 +761,30 @@ export class BotService {
         ? `\n\nЗаказ на ${formatDateRu(target)}: ${this.orderLabel(order.breakfast, order.lunch)}.`
         : `\n\nЗаказ на ${formatDateRu(target)} ещё не выбран.`;
     }
-    const role = this.roleFor(userId);
     await this.sendMessage(
       userId,
       text,
       childActionsKeyboard(child.id, {
-        canOrder: target !== null,
-        canEditName: true,
-        canChangeClass: this.canChangeChildClass(userId, child.id),
-        canDelete: role.name === 'creator' || role.name === 'teacher' || child.parent_user_id === userId,
+        canOrder: permissions.canOrder && target !== null,
+        canEditName: permissions.canEditName,
+        canChangeClass: permissions.canChangeClass,
+        canDelete: permissions.canDelete,
       }),
     );
   }
 
-  async sendOrderPrompt(userId, { childId = null, reminder = false, className = null } = {}) {
+  async sendOrderPrompt(
+    userId,
+    { childId = null, reminder = false, className = null, now = new Date() } = {},
+  ) {
     if (childId === null && className !== null) {
-      const target = this.activeTargetFor(userId, new Date(), className);
+      const target = this.activeTargetFor(userId, now, className);
       if (!target) return;
       const children = this.database.childrenForParent(userId).filter(
         (child) => child.class_name === className && !this.database.getOrder(child.id, target),
       );
       for (const child of children) {
-        await this.sendOrderPrompt(userId, { childId: child.id, reminder });
+        await this.sendOrderPrompt(userId, { childId: child.id, reminder, now });
       }
       return;
     }
@@ -739,13 +796,14 @@ export class BotService {
       await this.sendChildrenList(userId, { type: 'order' });
       return;
     }
-    const child = this.accessibleChild(userId, childId);
-    if (!child) {
-      await this.sendMessage(userId, 'Ребёнок не найден или у вас нет доступа.');
+    const permissions = this.childPermissions(userId, childId);
+    if (!permissions.canOrder) {
+      await this.sendMessage(userId, 'Заказывать питание может только родитель ребёнка.');
       return;
     }
+    const { child } = permissions;
     const schedule = this.getSchedule(child.class_name);
-    const target = this.activeTargetFor(userId, new Date(), child.class_name);
+    const target = this.activeTargetFor(userId, now, child.class_name);
     if (!target) {
       await this.sendMessage(
         userId,
@@ -766,11 +824,12 @@ export class BotService {
       await this.sendMessage(userId, 'Эта кнопка некорректна или уже неактуальна.');
       return;
     }
-    const child = this.accessibleChild(userId, childId);
-    if (!child) {
-      await this.sendMessage(userId, 'Ребёнок не найден или у вас нет доступа.');
+    const permissions = this.childPermissions(userId, childId);
+    if (!permissions.canOrder) {
+      await this.sendMessage(userId, 'Заказывать питание может только родитель ребёнка.');
       return;
     }
+    const { child } = permissions;
     if (target !== this.activeTargetFor(userId, new Date(), child.class_name)) {
       await this.sendMessage(userId, 'Время изменения этого заказа уже закончилось. Откройте /menu.');
       return;
@@ -857,7 +916,7 @@ export class BotService {
       await this.sendScheduleEditor(userId, field, className, minutes);
       return;
     }
-    this.database.setSetting(this.scheduleSettingKey(className, field), minutesToClock(minutes));
+    this.database.saveClassSchedule(className, next, userId);
     await this.sendMessage(
       userId,
       `Расписание класса ${className} сохранено. Новое время применяется сразу.`,

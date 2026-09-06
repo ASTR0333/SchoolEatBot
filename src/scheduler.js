@@ -31,9 +31,9 @@ export class DailyScheduler {
       for (const className of config.classes) {
         const schedule = this.service.getSchedule?.(className) ?? config;
         if (local.minutes >= schedule.promptMinutes && local.minutes < schedule.reminderMinutes) {
-          await this.sendPrompts(target, className);
+          await this.sendPrompts(target, className, now);
         } else if (local.minutes >= schedule.reminderMinutes && local.minutes < schedule.deadlineMinutes) {
-          await this.sendReminders(target, className);
+          await this.sendReminders(target, className, now);
         } else if (local.minutes >= schedule.deadlineMinutes) {
           await this.sendReports(target, className);
         }
@@ -45,12 +45,12 @@ export class DailyScheduler {
     }
   }
 
-  async sendPrompts(target, className) {
+  async sendPrompts(target, className, now = new Date()) {
     for (const userId of this.service.database.registeredParentIds(target, className)) {
       const key = `prompt:${target}:${className}:${userId}`;
       if (this.service.database.deliveryExists(key)) continue;
       try {
-        await this.service.sendOrderPrompt(userId, { className });
+        await this.service.sendOrderPrompt(userId, { className, now });
         this.service.database.recordDelivery(key);
       } catch (error) {
         console.error(`Не удалось отправить выбор питания пользователю ${userId}`, error);
@@ -58,12 +58,12 @@ export class DailyScheduler {
     }
   }
 
-  async sendReminders(target, className) {
+  async sendReminders(target, className, now = new Date()) {
     for (const userId of this.service.database.registeredParentIds(target, className)) {
       const key = `reminder:${target}:${className}:${userId}`;
       if (this.service.database.deliveryExists(key)) continue;
       try {
-        await this.service.sendOrderPrompt(userId, { reminder: true, className });
+        await this.service.sendOrderPrompt(userId, { reminder: true, className, now });
         this.service.database.recordDelivery(key);
       } catch (error) {
         console.error(`Не удалось отправить напоминание пользователю ${userId}`, error);

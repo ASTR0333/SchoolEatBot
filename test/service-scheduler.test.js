@@ -179,7 +179,7 @@ test('преподаватель может перейти в роль роди�
   });
 });
 
-test('права удаления зависят от текущего режима и принадлежности ребёнка', async () => {
+test('права управления не теряются при переключении интерфейса', async () => {
   await fixture(async ({ service, database }) => {
     database.upsertParent({ user_id: 100, name: 'Создатель' }, 100);
     database.upsertParent({ user_id: 200, name: 'Учитель' }, 200);
@@ -193,23 +193,30 @@ test('права удаления зависят от текущего режи�
     assert.equal(service.canManageChild(777, secondClass.id), false);
     assert.equal(service.canManageChild(200, firstClass.id), true);
     assert.equal(service.canManageChild(200, secondClass.id), false);
+    assert.equal(service.childPermissions(200, firstClass.id).canOrder, false);
     assert.equal(service.canManageChild(100, firstClass.id), true);
     assert.equal(service.canManageChild(100, secondClass.id), true);
+    assert.equal(service.childPermissions(100, firstClass.id).canOrder, false);
+    assert.equal(service.childPermissions(777, firstClass.id).canOrder, true);
 
     database.setViewMode(100, 'parent');
     assert.equal(service.canManageChild(100, creatorChild.id), true);
-    assert.equal(service.canManageChild(100, firstClass.id), false);
+    assert.equal(service.canManageChild(100, firstClass.id), true);
+    database.setViewMode(200, 'parent');
+    assert.equal(service.canManageChild(200, firstClass.id), true);
   });
 });
 
-test('создатель переключается в обычный режим родителя отдельно от тестового', async () => {
-  await fixture(async ({ service, database }) => {
+test('создатель всегда остаётся в служебной панели', async () => {
+  await fixture(async ({ service, database, api }) => {
     const creator = database.upsertParent({ user_id: 100, name: 'Создатель' }, 100);
     await service.handleRole({ user: { user_id: 100, name: 'Создатель' }, chatId: 100 });
-    assert.equal(database.getParent(creator.user_id).view_mode, 'parent');
-
-    await service.handleRole({ user: { user_id: 100, name: 'Создатель' }, chatId: 100 });
     assert.equal(database.getParent(creator.user_id).view_mode, null);
+    assert.match(api.messages.at(-1).text, /Панель создателя/);
+
+    await service.handleTest({ user: { user_id: 100, name: 'Создатель' }, chatId: 100 });
+    assert.equal(database.getParent(creator.user_id).view_mode, null);
+    assert.match(api.messages.at(-1).text, /Панель создателя/);
   });
 });
 
@@ -246,13 +253,101 @@ test('создатель сначала выбирает класс, препо�
   });
 });
 
-test('тестовый режим создателя открывает заказ вне обычного окна', async () => {
-  await fixture(async ({ service, database }) => {
+test('UI расписания: создатель выбирает класс, преподаватель меняет только свой, родитель не допущен', async () => {
+  await fixture(async ({ service, database, api }) => {
+    const callback = (userId, match) => ({
+      user: { user_id: userId, name: `Пользователь ${userId}` },
+      chatId: userId,
+      match,
+      async answerOnCallback() {},
+    });
+
+    await service.handleScheduleMenuAction(callback(100, ['schedule:menu']));
+    assert.match(api.messages.at(-1).text, /Для какого класса/);
+    await service.handleScheduleClassAction(callback(100, ['schedule:class:2Б', '2Б']));
+    assert.match(api.messages.at(-1).text, /Расписание класса 2Б/);
+    await service.handleScheduleSaveAction(
+      callback(100, ['schedule:save:prompt:840:2Б', 'prompt', '840', '2Б']),
+    );
+    assert.equal(service.getSchedule('2Б').promptTime, '14:00');
+    assert.equal(database.getClassSchedule('2Б').updated_by, 100);
+
+    await service.handleScheduleSaveAction(
+      callback(200, ['schedule:save:reminder:960:8МК', 'reminder', '960', '8МК']),
+    );
+    assert.equal(service.getSchedule('8МК').reminderTime, '16:00');
+    assert.equal(database.getClassSchedule('8МК').updated_by, 200);
+
+    await service.handleScheduleSaveAction(
+      callback(200, ['schedule:save:reminder:930:2Б', 'reminder', '930', '2Б']),
+    );
+    assert.equal(service.getSchedule('2Б').reminderTime, '16:30');
+    assert.match(api.messages.at(-1).text, /нет доступа/);
+
+    await service.handleScheduleMenuAction(callback(777, ['schedule:menu']));
+    assert.match(api.messages.at(-1).text, /только сотрудникам/);
+  });
+});
+
+test('создатель с устаревшим родительским режимом всё равно видит расписание и всех детей', async () => {
+  await fixture(async ({ service, database, api }) => {
     database.upsertParent({ user_id: 100, name: 'Создатель' }, 100);
-    database.setViewMode(100, 'test');
-    const outsideWindow = new Date('2026-09-01T08:00:00Z');
-    assert.equal(service.activeTarget(outsideWindow), null);
-    assert.equal(service.activeTargetFor(100, outsideWindow), '2026-09-02');
+    database.upsertParent({ user_id: 777, name: 'Родитель' }, 777);
+    database.addChild(777, 'Иванов Иван', '8МК');
+    database.setViewMode(100, 'parent');
+
+    await service.sendMenu(100);
+    assert.equal(database.getParent(100).view_mode, null);
+    assert.match(api.messages.at(-1).text, /Панель создателя/);
+    assert.match(api.messages.at(-1).text, /Расписание заказов/);
+
+    await service.sendChildrenList(100, { type: 'mine' });
+    assert.match(api.messages.at(-1).text, /Все дети/);
+  });
+});
+
+test('родитель видит расписание каждого ребёнка, а окна и напоминания срабатывают по классу', async () => {
+  await fixture(async ({ service, database, api }) => {
+    database.upsertParent({ user_id: 100, name: 'Создатель' }, 100);
+    database.upsertParent({ user_id: 200, name: 'Учитель' }, 200);
+    database.upsertParent({ user_id: 777, name: 'Родитель' }, 777);
+    database.addChild(777, 'Иванов Иван', '8МК');
+    database.addChild(777, 'Петров Пётр', '2Б');
+
+    await service.saveScheduleField(200, 'prompt', 8 * 60, '8МК');
+    await service.saveScheduleField(200, 'reminder', 8 * 60 + 30, '8МК');
+    await service.saveScheduleField(200, 'deadline', 9 * 60, '8МК');
+    await service.saveScheduleField(100, 'prompt', 15 * 60, '2Б');
+    await service.saveScheduleField(100, 'reminder', 16 * 60, '2Б');
+    await service.saveScheduleField(100, 'deadline', 17 * 60, '2Б');
+
+    await service.sendMenu(777);
+    assert.match(api.messages.at(-1).text, /8МК: 08:00–09:00, напоминание 08:30/);
+    assert.match(api.messages.at(-1).text, /2Б: 15:00–17:00, напоминание 16:00/);
+
+    const morning = new Date('2026-09-07T05:15:00Z');
+    const reminder = new Date('2026-09-07T05:45:00Z');
+    const afternoon = new Date('2026-09-07T12:15:00Z');
+    assert.equal(service.activeTargetFor(777, morning, '8МК'), '2026-09-08');
+    assert.equal(service.activeTargetFor(777, morning, '2Б'), null);
+    assert.equal(service.activeTargetFor(777, afternoon, '8МК'), null);
+    assert.equal(service.activeTargetFor(777, afternoon, '2Б'), '2026-09-08');
+
+    api.messages.length = 0;
+    service.sendReportTo = async () => {};
+    const scheduler = new DailyScheduler(service);
+    await scheduler.tick(morning);
+    await scheduler.tick(reminder);
+    await scheduler.tick(afternoon);
+
+    assert.equal(api.messages.length, 3);
+    assert.match(api.messages[0].text, /Иванов Иван/);
+    assert.doesNotMatch(api.messages[0].text, /Напоминаю/);
+    assert.match(api.messages[1].text, /Напоминаю.+Иванов Иван/s);
+    assert.match(api.messages[2].text, /Петров Пётр/);
+    assert.equal(database.deliveryExists('prompt:2026-09-08:8МК:777'), true);
+    assert.equal(database.deliveryExists('reminder:2026-09-08:8МК:777'), true);
+    assert.equal(database.deliveryExists('prompt:2026-09-08:2Б:777'), true);
   });
 });
 
@@ -300,5 +395,9 @@ test('планировщик учитывает время каждого кла
 
   await scheduler.tick(new Date('2026-09-02T12:15:00Z'));
 
-  assert.deepEqual(prompted, [{ userId: 777, className: '8МК' }]);
+  assert.deepEqual(prompted, [{
+    userId: 777,
+    className: '8МК',
+    now: new Date('2026-09-02T12:15:00Z'),
+  }]);
 });

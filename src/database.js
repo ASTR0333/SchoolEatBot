@@ -82,6 +82,15 @@ export class Database {
         value TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS class_schedules (
+        class_name TEXT PRIMARY KEY,
+        prompt_time TEXT NOT NULL,
+        reminder_time TEXT NOT NULL,
+        deadline_time TEXT NOT NULL,
+        updated_by INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
     this.setSetting('schema_version', SCHEMA_VERSION);
   }
@@ -265,6 +274,35 @@ export class Database {
       INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
     `).run(key, String(value), nowIso());
+  }
+
+  getClassSchedule(className) {
+    return this.connection.prepare(`
+      SELECT class_name, prompt_time, reminder_time, deadline_time, updated_by, updated_at
+      FROM class_schedules WHERE class_name = ?
+    `).get(className) ?? null;
+  }
+
+  saveClassSchedule(className, schedule, updatedBy) {
+    this.connection.prepare(`
+      INSERT INTO class_schedules (
+        class_name, prompt_time, reminder_time, deadline_time, updated_by, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(class_name) DO UPDATE SET
+        prompt_time = excluded.prompt_time,
+        reminder_time = excluded.reminder_time,
+        deadline_time = excluded.deadline_time,
+        updated_by = excluded.updated_by,
+        updated_at = excluded.updated_at
+    `).run(
+      className,
+      schedule.promptTime,
+      schedule.reminderTime,
+      schedule.deadlineTime,
+      updatedBy,
+      nowIso(),
+    );
+    return this.getClassSchedule(className);
   }
 
   deliveryExists(key) {

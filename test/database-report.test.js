@@ -63,6 +63,36 @@ test('получатели напоминаний фильтруются по к
   });
 });
 
+test('расписания классов сохраняются целиком и переживают перезапуск базы', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'school-eat-schedule-'));
+  const path = join(directory, 'bot.db');
+  let database = new Database(path);
+  database.saveClassSchedule('8МК', {
+    promptTime: '08:00', reminderTime: '08:30', deadlineTime: '09:00',
+  }, 200);
+  database.saveClassSchedule('2Б', {
+    promptTime: '15:00', reminderTime: '16:30', deadlineTime: '17:00',
+  }, 100);
+  database.close();
+
+  database = new Database(path);
+  try {
+    assert.deepEqual(
+      Object.fromEntries(
+        Object.entries(database.getClassSchedule('8МК')).filter(([key]) => key !== 'updated_at'),
+      ),
+      {
+        class_name: '8МК', prompt_time: '08:00', reminder_time: '08:30',
+        deadline_time: '09:00', updated_by: 200,
+      },
+    );
+    assert.equal(database.getClassSchedule('2Б').prompt_time, '15:00');
+  } finally {
+    database.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('старая тестовая схема очищается при переходе на новую модель', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'school-eat-legacy-'));
   const path = join(directory, 'bot.db');
